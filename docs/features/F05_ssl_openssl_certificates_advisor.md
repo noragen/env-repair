@@ -18,7 +18,7 @@ env-repair soll diese Fehlerbilder erkennen und **konkrete** Anleitungen geben (
 ## Implementierung
 ### Diagnose-Schritte
 - `python -c "import ssl; print(ssl.OPENSSL_VERSION)"` im Ziel-env (wenn python vorhanden)
-- `conda info --json` und channel/proxy settings ausgeben
+- `mamba info --json` (Fallback: `conda info --json`) und channel/proxy settings ausgeben
 - PATH-Check (Windows): fehlen `<env>\\Library\\bin` etc.
 - Heuristik: wenn `certifi` fehlt -> Hinweis/optional install
 

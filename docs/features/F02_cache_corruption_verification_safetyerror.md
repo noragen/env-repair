@@ -39,8 +39,8 @@ Defaults:
 
 ### Fix-Levels
 #### Level: safe
-- `conda clean --index-cache -y`
-- optional `conda clean --tempfiles -y`
+- `mamba clean --index-cache -y` (Fallback: `conda clean ...`)
+- optional `mamba clean --tempfiles -y`
 
 #### Level: targeted
 - Extrahiere betroffene Paketnamen/Build-Strings aus Fehltext (best effort)
@@ -49,7 +49,7 @@ Defaults:
   - `mamba install -p <env> --force-reinstall <pkgs> -y` (oder `conda install ...`)
 
 #### Level: aggressive
-- `conda clean --packages -y` oder `conda clean --all -y`
+- `mamba clean --packages -y` oder `mamba clean --all -y`
 - **Warnung**: kann bei symlink-basierten Envs Nebenwirkungen haben
 
 ### Report

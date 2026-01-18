@@ -19,10 +19,21 @@ from .i18n import t
 
 def build_parser():
     lang = "auto"
-    p = argparse.ArgumentParser(prog="env-repair", description=t("help_desc", lang=lang))
+    p = argparse.ArgumentParser(
+        prog="env-repair",
+        description=t("help_desc", lang=lang),
+        add_help=False,
+    )
+    p.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     sub = p.add_subparsers(dest="cmd")
 
-    rb = sub.add_parser("rollback", help=t("help_cmd_rollback", lang=lang))
+    rb = sub.add_parser(
+        "rollback",
+        help=t("help_cmd_rollback", lang=lang),
+        description=t("help_cmd_rollback", lang=lang),
+        add_help=False,
+    )
+    rb.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     rb.add_argument("--env", required=True, help=t("help_env_single", lang=lang))
     rb.add_argument("--to", default="prev", help=t("help_to", lang=lang))
     rb.add_argument("--dry-run", action="store_true", help=t("help_dry_run", lang=lang))
@@ -31,7 +42,13 @@ def build_parser():
     rb.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
     rb.add_argument("--plan", action="store_true", help=t("help_plan", lang=lang))
 
-    rb2 = sub.add_parser("rebuild", help=t("help_cmd_rebuild", lang=lang))
+    rb2 = sub.add_parser(
+        "rebuild",
+        help=t("help_cmd_rebuild", lang=lang),
+        description=t("help_cmd_rebuild", lang=lang),
+        add_help=False,
+    )
+    rb2.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     rb2.add_argument("--env", required=True, help=t("help_env_single", lang=lang))
     rb2.add_argument("--to", required=True, help=t("help_to_rebuild", lang=lang))
     rb2.add_argument("--verify", action="store_true", help=t("help_verify", lang=lang))
@@ -40,18 +57,36 @@ def build_parser():
     rb2.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     rb2.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
 
-    dc = sub.add_parser("diagnose-clobber", help=t("help_cmd_diagnose_clobber", lang=lang))
+    dc = sub.add_parser(
+        "diagnose-clobber",
+        help=t("help_cmd_diagnose_clobber", lang=lang),
+        description=t("help_cmd_diagnose_clobber", lang=lang),
+        add_help=False,
+    )
+    dc.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     dc.add_argument("--env", required=True, help=t("help_env_single", lang=lang))
     dc.add_argument("--logfile", required=True, help=t("help_logfile", lang=lang))
     dc.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     dc.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
 
-    di = sub.add_parser("diagnose-inconsistent", help=t("help_cmd_diagnose_inconsistent", lang=lang))
+    di = sub.add_parser(
+        "diagnose-inconsistent",
+        help=t("help_cmd_diagnose_inconsistent", lang=lang),
+        description=t("help_cmd_diagnose_inconsistent", lang=lang),
+        add_help=False,
+    )
+    di.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     di.add_argument("--env", required=True, help=t("help_env_single", lang=lang))
     di.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     di.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
 
-    fi = sub.add_parser("fix-inconsistent", help=t("help_cmd_fix_inconsistent", lang=lang))
+    fi = sub.add_parser(
+        "fix-inconsistent",
+        help=t("help_cmd_fix_inconsistent", lang=lang),
+        description=t("help_cmd_fix_inconsistent", lang=lang),
+        add_help=False,
+    )
+    fi.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     fi.add_argument("--env", required=True, help=t("help_env_single", lang=lang))
     fi.add_argument("--level", choices=["safe", "normal", "rebuild"], default="safe", help=t("help_level_inconsistent", lang=lang))
     fi.add_argument("--plan", action="store_true", help=t("help_plan", lang=lang))
@@ -59,18 +94,36 @@ def build_parser():
     fi.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     fi.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
 
-    cc = sub.add_parser("cache-check", help=t("help_cmd_cache_check", lang=lang))
+    cc = sub.add_parser(
+        "cache-check",
+        help=t("help_cmd_cache_check", lang=lang),
+        description=t("help_cmd_cache_check", lang=lang),
+        add_help=False,
+    )
+    cc.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     cc.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     cc.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
 
-    cf = sub.add_parser("cache-fix", help=t("help_cmd_cache_fix", lang=lang))
+    cf = sub.add_parser(
+        "cache-fix",
+        help=t("help_cmd_cache_fix", lang=lang),
+        description=t("help_cmd_cache_fix", lang=lang),
+        add_help=False,
+    )
+    cf.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     cf.add_argument("--level", choices=["safe", "targeted", "aggressive"], default="safe", help=t("help_level_cache", lang=lang))
     cf.add_argument("--plan", action="store_true", help=t("help_plan", lang=lang))
     cf.add_argument("-y", "--yes", action="store_true", help=t("help_yes", lang=lang))
     cf.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     cf.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
 
-    ds = sub.add_parser("diagnose-ssl", help=t("help_cmd_diagnose_ssl", lang=lang))
+    ds = sub.add_parser(
+        "diagnose-ssl",
+        help=t("help_cmd_diagnose_ssl", lang=lang),
+        description=t("help_cmd_diagnose_ssl", lang=lang),
+        add_help=False,
+    )
+    ds.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     ds.add_argument("--env", help=t("help_env_single", lang=lang))
     ds.add_argument("--base", action="store_true", help=t("help_base", lang=lang))
     ds.add_argument("--json", action="store_true", help=t("help_json", lang=lang))

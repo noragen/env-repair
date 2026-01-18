@@ -1,20 +1,67 @@
-# env-repair
+# 🩺 EnvRepair
+### Fixing broken Python environments – safely, transparently, reproducibly
 
-Scan and repair conda/mamba/micromamba environments with mixed conda/pip installs.
+<p align="center">
+  <img alt="EnvRepair icon" src="icons/env-repair-256x256.png" width="128" />
+</p>
 
-## What it does
-- Detects duplicate `.dist-info` entries and stale artifacts.
-- Reinstalls duplicates via mamba/conda or pip based on original source.
-- Optional `--adopt-pip` to move pypi-only packages to conda packages.
-- Can also scan/fix plain `venv`/`virtualenv` environments via pip-only mode (pass the env path).
+**EnvRepair** is a practical repair tool for the *messy reality* of Python environments:  
+Conda / Mamba / Micromamba mixed with `pip`, plus plain `venv` / `virtualenv`.
 
-## Requirements
+Instead of starting over (again), EnvRepair helps you **understand what’s broken**, **why it’s broken**, and **fix it safely** – with snapshots and rollback support, so you’re never locked in.
+
+---
+
+## 🤕 Why EnvRepair Exists
+
+If you’ve ever seen things like:
+
+- duplicate `.dist-info` folders  
+- mysterious `.pyd` conflicts on Windows  
+- `conda-meta` JSON files that suddenly break tools like PyInstaller  
+- environments that are *“inconsistent”* but still half-working  
+- pip + conda silently stepping on each other’s toes  
+
+…then EnvRepair is for you.
+
+It doesn’t try to replace conda or pip.  
+It steps in **after things already went wrong**.
+
+---
+
+## ✨ What EnvRepair Can Do
+
+### 🔍 Diagnose
+- Detect duplicates and leftovers (`.dist-info`, stale artifacts, some Windows `.pyd` duplicates).
+- Find corrupted or incomplete `conda-meta` entries.
+- Detect pip/conda case-sensitivity conflicts.
+
+### 🛠️ Repair (carefully!)
+- Repair mixed **conda + pip** installs using the *right* tool.
+- Reinstall broken packages with source awareness.
+- “Adopt” pip packages into conda where possible (`--adopt-pip`).
+- Handle **plain venv / virtualenv** setups (pip-only mode).
+
+### 🛟 Safety First
+- Automatic **rescue snapshots** before any destructive action.
+- Graceful recovery after `Ctrl+C`.
+- Clear prompts instead of silent force-fixes.
+
+---
+
+## 🧰 Requirements
 - Windows, Linux, or macOS.
-- `conda` or `mamba` or `micromamba` in PATH.
+- `mamba` in PATH for conda-style envs (preferred). `conda`/`micromamba` also work in many cases.
 - Python available in the target environment.
 
-## Usage
-Basic scan:
+---
+
+## 🚀 Quick Start
+
+> All examples below use Windows `cmd.exe` syntax (`.bat` blocks).  
+> Adjust paths/shells as needed for Linux/macOS.
+
+Basic scan (auto-discovers conda envs):
 ```bat
 python env_repair.py
 ```
@@ -30,7 +77,11 @@ Install from local checkout (non-editable):
 pip install .
 ```
 
-Fix base env:
+---
+
+## 🔁 Common Workflows
+
+Fix `base`:
 ```bat
 python env_repair.py --env base --fix
 ```
@@ -45,10 +96,14 @@ Same via installed CLI:
 env-repair --env base --fix
 ```
 
-Adopt pypi packages:
+Adopt pip packages into conda (where possible):
 ```bat
 python env_repair.py --env base --fix --adopt-pip
 ```
+
+---
+
+## ⏪ Rollback & Rebuild
 
 Rollback to previous conda revision:
 ```bat
@@ -67,15 +122,19 @@ env-repair rebuild --env base --to base-rebuilt --verify
 
 Rebuild into a new env (path):
 ```bat
-env-repair rebuild --env base --to C:\\temp\\base-rebuilt --verify
+env-repair rebuild --env base --to C:\temp\base-rebuilt --verify
 ```
 
-Diagnose a ClobberError from a logfile:
+---
+
+## 🧪 Advanced Diagnostics
+
+Diagnose a `ClobberError` from a logfile:
 ```bat
 env-repair diagnose-clobber --env base --logfile clobber.txt
 ```
 
-Diagnose / fix "inconsistent" env:
+Diagnose / fix “inconsistent” env:
 ```bat
 env-repair diagnose-inconsistent --env base
 env-repair fix-inconsistent --env base --level safe
@@ -95,7 +154,7 @@ env-repair diagnose-ssl --env base
 
 Create a conda-style snapshot (YAML):
 ```bat
-python env_repair.py --env base --snapshot snapshots\\base.yaml
+python env_repair.py --env base --snapshot snapshots\base.yaml
 ```
 
 Debug output:
@@ -103,31 +162,58 @@ Debug output:
 python env_repair.py --env base --fix --adopt-pip --debug
 ```
 
-Interrupted installs (Ctrl+C):
-- When you run with `--fix`, env-repair creates a rescue snapshot under `.env_repair\\snapshots\\...` before changing anything.
-- If you abort during a pip/conda/mamba step, env-repair will prompt:
+---
+
+## 🛟 Safety Net (Ctrl+C / Rescue)
+
+- When you run with `--fix`, EnvRepair creates a rescue snapshot under:
+  ```
+  .env_repair\snapshots\...
+  ```
+- If you abort during a pip/mamba/conda step, EnvRepair will prompt:
   - `r` restore from snapshot
   - `c` continue (skip)
   - `a` abort (default)
-- It also writes `.env_repair\\state.json` so you can inspect what happened and re-run env-repair afterwards.
+- A `.env_repair\state.json` file records progress so you can inspect what happened and re-run later.
+
+---
+
+## 🧑‍💻 Development
 
 Run tests:
 ```bat
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Quiet JSON output from mamba/conda:
+JSON output:
 ```bat
-python env_repair.py --env base --fix --adopt-pip
+python env_repair.py --env base --json
 ```
 
-## Notes
-- `--adopt-pip` installs only mapped pypi packages (no full re-install).
-- `--adopt-pip` is conda-only; for plain venvs it is ignored.
-- After successful `--adopt-pip`, env-repair uninstalls the pip version by default; use `--keep-pip` to skip.
-- For alias-like mappings (e.g. pip `msgpack` → conda `msgpack-python`), pip is only removed if both versions match.
-- Channels are loaded from `.condarc` first, then `defaults` and `anaconda` are added unless disabled.
+---
 
-## Files
-- `env_repair.py` CLI shim (kept for convenience)
-- `latest.txt` scratch notes (not required by the tool)
+## 📝 Notes
+
+- `--adopt-pip` installs only mapped PyPI packages.
+- `--adopt-pip` is conda-only; for plain venvs it is ignored.
+- After successful adoption, env-repair uninstalls the pip version by default; use `--keep-pip` to skip.
+- For alias-like mappings (e.g. pip `msgpack` → conda `msgpack-python`), pip is only removed if both versions match.
+- Channels are loaded from `.condarc` first, then `defaults` and `anaconda` unless disabled.
+
+---
+
+## 📁 Files
+
+- `env_repair.py` – CLI shim (kept for convenience).
+- `env_repair/` – actual implementation.
+- `docs/` – design notes, feature specs, and roadmaps.
+
+---
+
+## ❤️ Philosophy
+
+EnvRepair is opinionated, but cautious.  
+It prefers **understanding and repair** over brute-force reinstallation.
+
+If you’ve ever said *“I’ll just recreate the environment…”*  
+EnvRepair is here to save you that hour.
