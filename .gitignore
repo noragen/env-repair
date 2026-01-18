@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.idea/
+.vscode/
+.env
+*.log
+*.tmp
+/.env_repair
+/build
+/dist
+/env_repair.egg-info
