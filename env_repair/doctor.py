@@ -217,6 +217,39 @@ def _mamba_search_available(terms, channels, debug, *, show_json_output):
     return names
 
 
+def _resolve_adopt_pip_target(*, pip_name, variants, available):
+    """
+    Resolve a pip package name to the best matching conda package name from `mamba search`.
+
+    Fast-path: exact match against `variants` (case-sensitive, as returned by search parsing).
+    Fallback (conservative): handle common alias where conda uses a "-python" suffix,
+    e.g. pip "msgpack" -> conda "msgpack-python".
+    """
+    for v in variants:
+        if v in available:
+            return v
+
+    pip_norm = normalize_name(pip_name)
+    if not pip_norm:
+        return None
+
+    # Build a normalized lookup so we can match in a case-insensitive / separator-insensitive way.
+    norm_to_name = {}
+    for name in available:
+        if not isinstance(name, str) or not name:
+            continue
+        nn = normalize_name(name)
+        if nn not in norm_to_name or len(name) < len(norm_to_name[nn]):
+            norm_to_name[nn] = name
+
+    # Common conda naming alias: <name>-python
+    alias_norm = pip_norm + "-python"
+    if alias_norm in norm_to_name:
+        return norm_to_name[alias_norm]
+
+    return None
+
+
 def _adopt_pip_uninstall_plan(*, pip_to_conda, pip_versions, entries):
     """
     Decide which pip packages are safe to uninstall after adopt-pip.
@@ -413,11 +446,11 @@ def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, 
     resolve_progress = Progress(total=len(adopt_candidates), label=t("adopt_resolve", lang=lang))
     done = 0
     for pip_name in adopt_candidates:
-        resolved = None
-        for v in pip_to_variants[pip_name]:
-            if v in available:
-                resolved = v
-                break
+        resolved = _resolve_adopt_pip_target(
+            pip_name=pip_name,
+            variants=pip_to_variants[pip_name],
+            available=available,
+        )
         if resolved:
             pip_to_conda[pip_name] = resolved
             to_install.append(resolved)
