@@ -1,6 +1,7 @@
 import json
 import re
 from pathlib import Path
+from pathlib import PureWindowsPath
 
 
 def extract_paths_from_text(text, *, env_prefix):
@@ -10,18 +11,32 @@ def extract_paths_from_text(text, *, env_prefix):
     """
     if not text:
         return []
-    prefix = str(Path(env_prefix).resolve())
-    # Normalize for case-insensitive comparison on Windows.
-    prefix_cmp = prefix.lower()
+
+    def _looks_like_windows_abs(p):
+        # Accept a normal Windows path (C:\...) and also log-escaped variants (C:\\...),
+        # since conda/mamba errors often include doubled backslashes.
+        return bool(re.match(r"^[A-Za-z]:\\", p or ""))
+
+    def _normalize_windows_abs(p):
+        # Logs often contain escaped backslashes (C:\\Anaconda3\\...) – unescape them.
+        p = (p or "").replace("\\\\", "\\")
+        # Normalize separators and case-insensitive comparison via a forward-slash form.
+        return str(PureWindowsPath(p).as_posix()).lower()
+
+    prefix_is_win = _looks_like_windows_abs(env_prefix)
+    prefix_cmp = _normalize_windows_abs(env_prefix) if prefix_is_win else str(Path(env_prefix).resolve())
+    if prefix_is_win:
+        # Ensure consistent prefix matching (avoid C:/A matching C:/AB).
+        prefix_cmp = prefix_cmp.rstrip("/")
 
     # Common patterns include quoted paths, or lines containing "path:".
     candidates = set()
 
     # Quoted windows paths: 'C:\\...'
-    for m in re.finditer(r"['\"]([A-Za-z]:\\\\[^'\"]+)['\"]", text):
+    for m in re.finditer(r"['\"]([A-Za-z]:\\[^'\"]+)['\"]", text):
         candidates.add(m.group(1))
     # Unquoted windows paths: C:\...\something
-    for m in re.finditer(r"([A-Za-z]:\\\\[^\\s\\r\\n]+)", text):
+    for m in re.finditer(r"([A-Za-z]:\\[^\\s\\r\\n]+)", text):
         candidates.add(m.group(1))
     # POSIX paths (for completeness)
     for m in re.finditer(r"(/[^\\s\\r\\n]+)", text):
@@ -29,11 +44,18 @@ def extract_paths_from_text(text, *, env_prefix):
 
     inside = []
     for p in candidates:
+        if prefix_is_win and _looks_like_windows_abs(p):
+            cand_norm = _normalize_windows_abs(p)
+            if cand_norm == prefix_cmp or cand_norm.startswith(prefix_cmp + "/"):
+                inside.append(str(PureWindowsPath(p.replace("\\\\", "\\"))))
+            continue
+
         try:
             rp = str(Path(p).resolve())
         except Exception:
             continue
-        if rp.lower().startswith(prefix_cmp):
+        # Normalize for case-insensitive comparison on Windows prefixes that are not Windows-abs.
+        if rp.lower().startswith(str(prefix_cmp).lower()):
             inside.append(rp)
     return sorted(set(inside))
 
