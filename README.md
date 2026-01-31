@@ -1,4 +1,4 @@
-# 🩺 EnvRepair
+# 🩺 EnvRepair [![CI](https://github.com/noragen/env-repair/actions/workflows/ci.yml/badge.svg)](https://github.com/noragen/env-repair/actions/workflows/ci.yml)
 ### Fixing broken Python environments – safely, transparently, reproducibly
 
 <p align="center">
