@@ -5,7 +5,13 @@
 - Docs: prefer `mamba` in command examples (keep `conda` as fallback where needed).
 - Core env scan and repair workflow.
 - Adopt-pip flow with conda mapping and fallback checks.
+- Adopt-pip: reduced `mamba search` combinatorics (2-pass search) and added explicit PyPI→conda name overrides (e.g. `msgpack`→`msgpack-python`, `build`→`python-build`, `ccxt`→`ccxt-py`).
+- Adopt-pip: solver-fail handling now skips offending packages, retries the batch, and remembers failures in `.env_repair/adopt_pip_blacklist.json`.
+- Verify-imports: `verify-imports --full --fix` with dependency-first repair stage, batched conda reinstalls, and solver-offender skipping + persistent blacklist in `.env_repair/verify_imports_blacklist.json`.
+- Verify-imports: better handling of “unfixable” cases (platform-only imports like `sh`/`ptyprocess`, crashing imports like `PySimpleGUI`, obsolete packages like `idna_ssl`).
+- Fix loops: avoid pointless pip-uninstall+conda-reinstall for conda-owned dist-info (e.g. `PyDrive`/`pydrive` case-conflicts).
 - Debug output and progress indicators.
+- Debug: show exact `mamba/conda/...` command lines (`[cmd] ...`) and stream stdout/stderr live for transparency.
 - Support plain `venv`/`virtualenv` envs via `--env <path>` (pip-only scan/fix).
 - Ctrl+C handling during installs: no traceback, rescue snapshot + interactive restore/continue/abort prompt, state saved to `.env_repair/state.json`.
 - Localized CLI output (auto-detected from system locale).
@@ -17,3 +23,5 @@
 - Added `diagnose-inconsistent` and `fix-inconsistent` (levels: safe/normal/rebuild).
 - Added `cache-check` and `cache-fix` (levels: safe/targeted/aggressive, confirmation via `-y`).
 - Added `diagnose-ssl` advisor (checks `import ssl` in env/base and prints guidance).
+- CI: GitHub Actions workflow for unit tests and sdist/wheel build checks.
+- Release: GitHub Actions workflows for PyPI (Trusted Publishing) and optional anaconda.org upload; local conda-build recipe for testing feedstock packaging.

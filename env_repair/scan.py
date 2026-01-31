@@ -148,13 +148,17 @@ def scan_conda_meta_json(env_path):
             )
             continue
         if "depends" not in data:
-            issues.append(
-                {
-                    "type": "conda-meta-missing-depends",
-                    "path": str(p),
-                    "package": pkg_name,
-                    "version": version,
-                    "build": build,
-                }
-            )
+            # Some conda-meta records legitimately omit `depends` (e.g. certain noarch/helper packages).
+            # Only flag as broken if the record also looks incomplete.
+            required = ("name", "version", "build")
+            if not all(k in data for k in required):
+                issues.append(
+                    {
+                        "type": "conda-meta-missing-depends",
+                        "path": str(p),
+                        "package": pkg_name,
+                        "version": version,
+                        "build": build,
+                    }
+                )
     return issues

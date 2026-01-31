@@ -1,0 +1,47 @@
+name: Release (anaconda.org)
+
+on:
+  workflow_dispatch:
+    inputs:
+      anaconda_user:
+        description: "Target Anaconda username (channel owner), e.g. 'noragen'"
+        required: true
+        type: string
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          python-version: "3.13"
+          channels: conda-forge
+          channel-priority: strict
+
+      - name: Install build tools
+        shell: bash -l {0}
+        run: |
+          conda install -y conda-build anaconda-client
+
+      - name: Build conda package
+        shell: bash -l {0}
+        run: |
+          conda build conda.recipe
+
+      - name: Upload to anaconda.org
+        shell: bash -l {0}
+        env:
+          ANACONDA_TOKEN: ${{ secrets.ANACONDA_TOKEN }}
+          ANACONDA_USER: ${{ inputs.anaconda_user }}
+        run: |
+          if [ -z "${ANACONDA_TOKEN}" ]; then
+            echo "Missing ANACONDA_TOKEN secret" 1>&2
+            exit 2
+          fi
+          PKG="$(conda build conda.recipe --output)"
+          echo "Uploading: ${PKG}"
+          anaconda -t "${ANACONDA_TOKEN}" upload -u "${ANACONDA_USER}" --force "${PKG}"

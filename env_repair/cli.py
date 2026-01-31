@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 
 from .doctor import (
@@ -13,6 +14,7 @@ from .doctor import (
     rollback,
     run,
 )
+from .verify_imports import verify_imports
 from .subprocess_utils import OperationInterrupted
 from .i18n import t
 
@@ -129,6 +131,19 @@ def build_parser():
     ds.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     ds.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
 
+    vi = sub.add_parser(
+        "verify-imports",
+        help="Check if installed packages can be imported",
+        description="Verify that packages are importable (finds missing DLLs, etc.)",
+        add_help=False,
+    )
+    vi.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
+    vi.add_argument("--env", help=t("help_env_single", lang=lang))
+    vi.add_argument("--full", action="store_true", help="Check all packages (default: critical only)")
+    vi.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
+    vi.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
+    vi.add_argument("--fix", action="store_true", help="Attempt to automatically fix broken imports")
+
     p.add_argument(
         "--env",
         action="append",
@@ -164,6 +179,9 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "debug", False):
+        # Make subprocess executions print conda/mamba command lines for transparency.
+        os.environ["ENV_REPAIR_SHOW_CMDS"] = "1"
     try:
         if args.cmd == "rollback":
             result = rollback(args)
@@ -181,6 +199,8 @@ def main(argv=None):
             result = cache_fix(args)
         elif args.cmd == "diagnose-ssl":
             result = diagnose_ssl(args)
+        elif args.cmd == "verify-imports":
+            result = verify_imports(args)
         else:
             result = run(args)
     except (KeyboardInterrupt, OperationInterrupted):

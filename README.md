@@ -101,6 +101,11 @@ Adopt pip packages into conda (where possible):
 python env_repair.py --env base --fix --adopt-pip
 ```
 
+Verify imports (and fix what can be fixed):
+```bat
+python env_repair.py verify-imports --env base --full --fix
+```
+
 ---
 
 ## ⏪ Rollback & Rebuild
@@ -178,6 +183,23 @@ python env_repair.py --env base --fix --adopt-pip --debug
 
 ---
 
+## 🔎 Import Verification (`verify-imports`)
+
+EnvRepair can scan installed distributions and run `python -c "import <name>"` for their top-level modules.
+
+Full scan + auto-fix (recommended when an env is “mostly working but randomly broken”):
+```bat
+python env_repair.py verify-imports --env base --full --fix --debug
+```
+
+Notes:
+- Repairs use **batched** conda/mamba operations (no slow one-by-one reinstalls).
+- If the solver fails for a specific package, EnvRepair retries the batch without the offending spec and remembers it in:
+  - `.env_repair\verify_imports_blacklist.json`
+- Platform-only modules are skipped (e.g. `sh` on Windows, `ptyprocess` missing `fcntl` on Windows).
+
+---
+
 ## 🧑‍💻 Development
 
 Run tests:
@@ -199,6 +221,7 @@ python env_repair.py --env base --json
 - After successful adoption, env-repair uninstalls the pip version by default; use `--keep-pip` to skip.
 - For alias-like mappings (e.g. pip `msgpack` → conda `msgpack-python`), pip is only removed if both versions match.
 - Channels are loaded from `.condarc` first, then `defaults` and `anaconda` unless disabled.
+- `--debug` prints the exact external command lines as `[cmd] ...` (mamba/conda/pip), and streams live output to keep long operations transparent.
 
 ---
 
@@ -207,6 +230,19 @@ python env_repair.py --env base --json
 - `env_repair.py` – CLI shim (kept for convenience).
 - `env_repair/` – actual implementation.
 - `docs/` – design notes, feature specs, and roadmaps.
+
+---
+
+## 📦 Releases
+
+PyPI releases are automated via GitHub Actions (Trusted Publishing) on tags:
+- `vX.Y.Z` → `.github/workflows/release-pypi.yml`
+
+conda-forge publishing is done via a feedstock (standard conda-forge process). For details see:
+- `docs/releasing.md`
+
+Local conda recipe (for testing) lives in:
+- `conda.recipe/`
 
 ---
 

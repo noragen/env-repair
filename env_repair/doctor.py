@@ -22,7 +22,15 @@ from .conda_ops import (
     rollback_to_revision,
 )
 from .conflicts import find_same_version_case_conflicts
-from .discovery import detect_managers, discover_envs, get_python_exe, get_site_packages, which
+from .discovery import (
+    detect_managers,
+    discover_envs,
+    env_name_from_path,
+    get_python_exe,
+    get_site_packages,
+    select_envs,
+    which,
+)
 from .i18n import t
 from .naming import build_search_variants, normalize_name
 from .pip_ops import pip_freeze, pip_install_requirements, pip_list_json, pip_reinstall, pip_uninstall
@@ -41,6 +49,14 @@ from .subprocess_utils import run_cmd_capture
 
 from .clobber import build_conda_file_owner_map, extract_paths_from_text, to_relpath
 from .inconsistent import parse_inconsistent
+from .repair import (
+    _adopt_pip,
+    _apply_same_version_case_conflicts,
+    _cleanup_duplicate_dist_info,
+    _fix_conda_meta_issues,
+    _fix_duplicates,
+    _remove_invalid_artifacts,
+)
 
 def _debug(enabled, event, payload):
     if not enabled:
@@ -48,45 +64,6 @@ def _debug(enabled, event, payload):
     print("[debug]", f"{event}:", payload)
 
 
-def env_name_from_path(path):
-    p = Path(path)
-    if p.name:
-        return p.name
-    return str(path)
-
-
-def select_envs(all_envs, targets, base_prefix):
-    if not targets:
-        return list(all_envs)
-
-    out = []
-    by_name = {Path(p).name.lower(): p for p in all_envs}
-    for t in targets:
-        if not t:
-            continue
-        # If user passed a path (relative or absolute), use it directly.
-        tp = Path(t)
-        if tp.exists():
-            out.append(str(tp.resolve()))
-            continue
-        if os.path.isabs(t) or (":" in t and "\\" in t):
-            out.append(t)
-            continue
-        if t.lower() == "base" and base_prefix:
-            out.append(base_prefix)
-            continue
-        if t.lower() in by_name:
-            out.append(by_name[t.lower()])
-            continue
-    # de-dupe while preserving order
-    seen = set()
-    dedup = []
-    for p in out:
-        if p in seen:
-            continue
-        seen.add(p)
-        dedup.append(p)
-    return dedup
 
 
 def scan_env(env_path):
@@ -115,434 +92,6 @@ def scan_env(env_path):
     return env
 
 
-def _fix_conda_meta_issues(env, manager, channels, ignore_pinned, force_reinstall, debug):
-    """
-    Repair broken conda-meta records by force-reinstalling the owning package.
-    """
-    if not manager:
-        return []
-    pkgs = []
-    for issue in env.get("issues") or []:
-        if issue.get("type") not in ("conda-meta-invalid-json", "conda-meta-missing-depends"):
-            continue
-        pkg = issue.get("package")
-        if isinstance(pkg, str) and pkg:
-            pkgs.append(pkg)
-    pkgs = sorted(set(pkgs))
-    if not pkgs:
-        return []
-    ok = conda_install(
-        env["path"],
-        pkgs,
-        manager,
-        channels,
-        ignore_pinned=ignore_pinned,
-        force_reinstall=True if force_reinstall else True,
-    )
-    _debug(debug, "conda_meta_reinstall", {"count": len(pkgs), "ok": ok})
-    fixes = [
-        {
-            "fixed": ok,
-            "method": "mamba/conda",
-            "package": "conda-meta",
-            "count": len(pkgs),
-            "reason_key": "reason_conda_meta_reinstall",
-        }
-    ]
-    if ok:
-        env["issues"] = [
-            i
-            for i in env.get("issues") or []
-            if i.get("type") not in ("conda-meta-invalid-json", "conda-meta-missing-depends")
-        ]
-    return fixes
-
-
-def _remove_invalid_artifacts(env, debug):
-    fixes = []
-    for issue in list(env.get("issues") or []):
-        if issue.get("type") != "invalid-artifact":
-            continue
-        ok = remove_invalid_artifact(issue.get("path") or "")
-        fixes.append(
-            {
-                "fixed": ok,
-                "method": "cleanup",
-                "artifact": issue.get("name"),
-                "reason_key": "reason_stale_artifact",
-            }
-        )
-        if ok:
-            env["issues"].remove(issue)
-        _debug(debug, "invalid_artifact_cleanup", {"path": issue.get("path"), "ok": ok})
-    return fixes
-
-
-def _cleanup_duplicate_dist_info(env, debug):
-    """
-    For each duplicate-dist-info group: remove all dist-info directories (we rely on reinstall afterwards).
-    """
-    fixes = []
-    for issue in list(env.get("issues") or []):
-        if issue.get("type") != "duplicate-dist-info":
-            continue
-        ok = remove_dist_info_paths(issue.get("paths") or [])
-        fixes.append(
-            {
-                "fixed": ok,
-                "method": "cleanup",
-                "package": issue.get("package"),
-                "reason_key": "reason_duplicate_dist_info",
-            }
-        )
-        if ok:
-            env["issues"].remove(issue)
-        _debug(debug, "duplicate_dist_info_cleanup", {"package": issue.get("package"), "ok": ok})
-    return fixes
-
-
-def _mamba_search_available(terms, channels, debug, *, show_json_output):
-    if not terms:
-        return set()
-    if not which("mamba") and not which("conda"):
-        return set()
-    manager = "mamba" if which("mamba") else "conda"
-    channel_args = []
-    for ch in channels:
-        channel_args.extend(["-c", ch])
-    cmd = [manager, "search"] + list(terms) + channel_args + ["--json"]
-    data = run_json_cmd(cmd, show_json_output=show_json_output)
-    names = set(parse_search_output(data))
-    _debug(debug, "mamba_search", {"terms": len(terms), "results": len(names)})
-    return names
-
-
-def _resolve_adopt_pip_target(*, pip_name, variants, available):
-    """
-    Resolve a pip package name to the best matching conda package name from `mamba search`.
-
-    Fast-path: exact match against `variants` (case-sensitive, as returned by search parsing).
-    Fallback (conservative): handle common alias where conda uses a "-python" suffix,
-    e.g. pip "msgpack" -> conda "msgpack-python".
-    """
-    for v in variants:
-        if v in available:
-            return v
-
-    pip_norm = normalize_name(pip_name)
-    if not pip_norm:
-        return None
-
-    # Build a normalized lookup so we can match in a case-insensitive / separator-insensitive way.
-    norm_to_name = {}
-    for name in available:
-        if not isinstance(name, str) or not name:
-            continue
-        nn = normalize_name(name)
-        if nn not in norm_to_name or len(name) < len(norm_to_name[nn]):
-            norm_to_name[nn] = name
-
-    # Common conda naming alias: <name>-python
-    alias_norm = pip_norm + "-python"
-    if alias_norm in norm_to_name:
-        return norm_to_name[alias_norm]
-
-    return None
-
-
-def _adopt_pip_uninstall_plan(*, pip_to_conda, pip_versions, entries):
-    """
-    Decide which pip packages are safe to uninstall after adopt-pip.
-
-    Policy: only uninstall pip package if the mapped conda package exists and has the same version.
-    This avoids removing pip when the mapping is only an alias (e.g. msgpack -> msgpack-python) but
-    conda ended up with a different version.
-    Returns (uninstallable_pip_names, skipped_details).
-    """
-
-    def conda_version_for(name):
-        want = normalize_name(name)
-        for item in entries or []:
-            ch = (item.get("channel") or "").lower()
-            if ch and ch != "pypi" and normalize_name(item.get("name") or "") == want:
-                v = item.get("version")
-                if isinstance(v, str):
-                    return v
-        return None
-
-    uninstallable = []
-    skipped = []
-    for pip_name, conda_name in sorted((pip_to_conda or {}).items()):
-        pv = pip_versions.get(pip_name)
-        cv = conda_version_for(conda_name)
-        if pv and cv and pv == cv:
-            uninstallable.append(pip_name)
-        else:
-            skipped.append({"pip": pip_name, "pip_version": pv, "conda": conda_name, "conda_version": cv})
-    return uninstallable, skipped
-
-
-def _choose_reinstall_method(entries_index, pkg_norm, prefer, pip_fallback):
-    """
-    Decide installer for a normalized package based on conda list entries.
-    Returns: ("conda"|"pip"|None, package_name_for_installer)
-    """
-    info = entries_index.get(pkg_norm) or {}
-    channels = info.get("channels") or set()
-    names_by_channel = info.get("names") or {}
-
-    if prefer == "pip":
-        if "pypi" in channels:
-            pip_names = sorted(list(names_by_channel.get("pypi") or []), key=len)
-            return "pip", pip_names[0] if pip_names else None
-        if pip_fallback:
-            # if unknown, try pip with normalized name
-            return "pip", pkg_norm
-        return None, None
-
-    # conda preferred (auto/conda)
-    non_pypi_channels = [c for c in channels if c and c != "pypi"]
-    if non_pypi_channels:
-        # take shortest name from any conda channel
-        candidates = []
-        for ch in non_pypi_channels:
-            candidates.extend(list(names_by_channel.get(ch) or []))
-        candidates = sorted(set(candidates), key=len)
-        return "conda", candidates[0] if candidates else pkg_norm
-
-    if "pypi" in channels:
-        pip_names = sorted(list(names_by_channel.get("pypi") or []), key=len)
-        return "pip", pip_names[0] if pip_names else pkg_norm
-
-    return "conda", pkg_norm
-
-
-def _build_channel_index(entries):
-    index = {}
-    for item in entries or []:
-        name = item.get("name")
-        channel = (item.get("channel") or "").lower()
-        if not isinstance(name, str) or not channel:
-            continue
-        norm = normalize_name(name)
-        info = index.setdefault(norm, {"channels": set(), "names": {}})
-        info["channels"].add(channel)
-        info["names"].setdefault(channel, set()).add(name)
-    return index
-
-
-def _apply_same_version_case_conflicts(env, entries, manager, channels, ignore_pinned, force_reinstall, debug):
-    fixes = []
-    python_exe = env.get("python")
-    pip_names, conda_force = find_same_version_case_conflicts(entries)
-    if pip_names and python_exe:
-        ok = pip_uninstall(python_exe, pip_names)
-        fixes.append(
-            {
-                "fixed": ok,
-                "method": "pip-uninstall",
-                "package": "case-conflicts",
-                "reason_key": "reason_case_conflict_pip_uninstall",
-            }
-        )
-        _debug(debug, "case_conflict_pip_uninstall", {"count": len(pip_names), "ok": ok})
-    if conda_force and manager:
-        ok = conda_install(
-            env["path"],
-            conda_force,
-            manager,
-            channels,
-            ignore_pinned=ignore_pinned,
-            force_reinstall=True,
-        )
-        fixes.append(
-            {
-                "fixed": ok,
-                "method": "mamba/conda",
-                "package": "case-conflicts",
-                "reason_key": "reason_case_conflict_conda_relink",
-            }
-        )
-        _debug(debug, "case_conflict_conda_reinstall", {"count": len(conda_force), "ok": ok})
-    return fixes
-
-
-def _fix_duplicates(env, entries, manager, channels, ignore_pinned, force_reinstall, prefer, pip_fallback, debug):
-    fixes = []
-    idx = _build_channel_index(entries)
-
-    dup_pkgs = [i.get("package") for i in env.get("issues") or [] if i.get("type") == "duplicate-dist-info"]
-    dup_pkgs = [p for p in dup_pkgs if isinstance(p, str)]
-    for pkg_norm in dup_pkgs:
-        method, name = _choose_reinstall_method(idx, pkg_norm, prefer, pip_fallback)
-        if method == "pip":
-            py = env.get("python")
-            ok = bool(py) and pip_reinstall(py, name)
-            fixes.append({"fixed": ok, "method": "pip", "package": pkg_norm, "reason_key": "reason_reinstall_duplicates"})
-        else:
-            ok = bool(manager) and conda_install(
-                env["path"],
-                [name],
-                manager,
-                channels,
-                ignore_pinned=ignore_pinned,
-                force_reinstall=force_reinstall,
-            )
-            fixes.append(
-                {"fixed": ok, "method": "mamba/conda", "package": pkg_norm, "reason_key": "reason_reinstall_duplicates"}
-            )
-        _debug(debug, "duplicate_fix_attempt", {"package": pkg_norm, "method": method, "name": name})
-    return fixes
-
-
-def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, pip_uninstall_flag, debug, *, show_json_output, lang):
-    if not manager:
-        return []
-
-    fixes = []
-    idx = _build_channel_index(entries)
-    pip_entries = [
-        e
-        for e in entries
-        if (e.get("channel") or "").lower() == "pypi" and isinstance(e.get("name"), str) and isinstance(e.get("version"), str)
-    ]
-    if not pip_entries:
-        return []
-
-    # Only consider pip packages that are not already provided by conda under the same normalized name.
-    adopt_candidates = []
-    for e in pip_entries:
-        norm = normalize_name(e["name"])
-        info = idx.get(norm) or {}
-        conda_channels = [c for c in (info.get("channels") or set()) if c and c != "pypi"]
-        if conda_channels:
-            continue
-        adopt_candidates.append(e["name"])
-
-    if not adopt_candidates:
-        return []
-
-    # Build search terms (exact + wildcard) for all variants.
-    terms = []
-    pip_to_variants = {}
-    for pip_name in adopt_candidates:
-        variants = build_search_variants(pip_name)
-        pip_to_variants[pip_name] = variants
-        for v in variants:
-            terms.append(v)
-            terms.append(v + "*")
-    # De-dupe while keeping order.
-    seen = set()
-    terms = [t for t in terms if not (t in seen or seen.add(t))]
-
-    progress = Progress(total=1, label=t("adopt_search", lang=lang) + " 1/1")
-    available = _mamba_search_available(terms, channels, debug, show_json_output=show_json_output)
-    progress.update(1)
-    progress.finish()
-
-    to_install = []
-    pip_to_conda = {}
-    pip_versions = {e["name"]: e["version"] for e in pip_entries}
-    resolve_progress = Progress(total=len(adopt_candidates), label=t("adopt_resolve", lang=lang))
-    done = 0
-    for pip_name in adopt_candidates:
-        resolved = _resolve_adopt_pip_target(
-            pip_name=pip_name,
-            variants=pip_to_variants[pip_name],
-            available=available,
-        )
-        if resolved:
-            pip_to_conda[pip_name] = resolved
-            to_install.append(resolved)
-        done += 1
-        resolve_progress.update(done)
-    resolve_progress.finish()
-
-    if not to_install:
-        return []
-
-    ok = conda_install(
-        env["path"],
-        sorted(set(to_install)),
-        manager,
-        channels,
-        ignore_pinned=ignore_pinned,
-        force_reinstall=force_reinstall,
-    )
-    fixes.append(
-        {
-            "fixed": ok,
-            "method": "mamba/conda",
-            "package": "<pip-to-conda>",
-            "count": len(to_install),
-            "reason_key": "reason_adopt_conda_install",
-        }
-    )
-    _debug(debug, "adopt_pip_conda_install", {"count": len(to_install), "ok": ok})
-
-    if ok and pip_uninstall_flag and env.get("python"):
-        # Uninstall pip names only if conda install succeeded.
-        #
-        # Note: If conda installed into paths previously owned by pip, a subsequent pip uninstall
-        # could remove those paths (because pip removes files listed in its RECORD).
-        # Mitigation: after pip uninstall, force-reinstall the conda package(s) again to relink files.
-        # Refresh entries so we can compare versions after the conda install.
-        refreshed = get_env_package_entries(env["path"], manager, show_json_output=show_json_output)
-
-        uninstallable, skipped = _adopt_pip_uninstall_plan(
-            pip_to_conda=pip_to_conda,
-            pip_versions=pip_versions,
-            entries=refreshed,
-        )
-        for item in skipped:
-            fixes.append(
-                {
-                    "fixed": True,
-                    "method": "skip",
-                    "package": "<pip-to-conda>",
-                    "reason_key": "reason_adopt_skip_keep",
-                    "reason_args": {
-                        "pip": item["pip"],
-                        "pip_version": item["pip_version"],
-                        "conda": item["conda"],
-                        "conda_version": item["conda_version"],
-                    },
-                }
-            )
-
-        if uninstallable:
-            ok2 = pip_uninstall(env["python"], uninstallable)
-            fixes.append(
-                {
-                    "fixed": ok2,
-                    "method": "pip-uninstall",
-                    "package": "<pip-to-conda>",
-                    "count": len(uninstallable),
-                    "reason_key": "reason_adopt_pip_uninstall",
-                }
-            )
-            _debug(debug, "adopt_pip_pip_uninstall", {"count": len(uninstallable), "ok": ok2})
-
-            ok3 = conda_install(
-                env["path"],
-                sorted(set(to_install)),
-                manager,
-                channels,
-                ignore_pinned=ignore_pinned,
-                force_reinstall=True,
-            )
-            fixes.append(
-                {
-                    "fixed": ok3,
-                    "method": "mamba/conda",
-                    "package": "<pip-to-conda>",
-                    "count": len(to_install),
-                    "reason_key": "reason_adopt_conda_relink",
-                }
-            )
-            _debug(debug, "adopt_pip_conda_relink", {"count": len(to_install), "ok": ok3})
-
-    return fixes
 
 
 def _print_fix_report(fixes, *, lang):
@@ -1096,6 +645,7 @@ def run(args):
                         args.prefer,
                         pip_fallback,
                         args.debug,
+                        in_conda_env=bool(conda_here),
                     )
                 )
 

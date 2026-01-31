@@ -93,3 +93,43 @@ def get_site_packages(python_exe):
         return [str(Path(p)) for p in data if isinstance(p, str)]
     except ValueError:
         return []
+
+def env_name_from_path(path):
+    p = Path(path)
+    if p.name:
+        return p.name
+    return str(path)
+
+
+def select_envs(all_envs, targets, base_prefix):
+    if not targets:
+        return list(all_envs)
+
+    out = []
+    by_name = {Path(p).name.lower(): p for p in all_envs}
+    for t in targets:
+        if not t:
+            continue
+        # If user passed a path (relative or absolute), use it directly.
+        tp = Path(t)
+        if tp.exists():
+            out.append(str(tp.resolve()))
+            continue
+        if os.path.isabs(t) or (":" in t and "\\" in t):
+            out.append(t)
+            continue
+        if t.lower() == "base" and base_prefix:
+            out.append(base_prefix)
+            continue
+        if t.lower() in by_name:
+            out.append(by_name[t.lower()])
+            continue
+    # de-dupe while preserving order
+    seen = set()
+    dedup = []
+    for p in out:
+        if p in seen:
+            continue
+        seen.add(p)
+        dedup.append(p)
+    return dedup

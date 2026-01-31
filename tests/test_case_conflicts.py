@@ -11,8 +11,8 @@ class TestCaseConflicts(unittest.TestCase):
             {"name": "Bottleneck", "version": "1.6.0", "channel": "pypi"},
             {"name": "bottleneck", "version": "1.6.0", "channel": "conda-forge"},
         ]
-        pip_uninstall, conda_force = ed.find_same_version_case_conflicts(entries)
-        self.assertEqual(set(pip_uninstall), {"Automat", "Bottleneck"})
+        pip_items, conda_force = ed.find_same_version_case_conflicts(entries)
+        self.assertEqual({i["name"] for i in pip_items}, {"Automat", "Bottleneck"})
         self.assertEqual(set(conda_force), {"automat", "bottleneck"})
 
     def test_different_versions_not_selected(self):
@@ -20,8 +20,8 @@ class TestCaseConflicts(unittest.TestCase):
             {"name": "Automat", "version": "25.4.16", "channel": "pypi"},
             {"name": "automat", "version": "25.4.15", "channel": "conda-forge"},
         ]
-        pip_uninstall, conda_force = ed.find_same_version_case_conflicts(entries)
-        self.assertEqual(pip_uninstall, [])
+        pip_items, conda_force = ed.find_same_version_case_conflicts(entries)
+        self.assertEqual(pip_items, [])
         self.assertEqual(conda_force, [])
 
 

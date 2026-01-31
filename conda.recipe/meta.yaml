@@ -1,0 +1,40 @@
+{% set name = "env-repair" %}
+{% set version = "0.2.0" %}  # keep in sync with pyproject.toml
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  # For local testing in this repo.
+  path: ..
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  host:
+    - python >=3.9
+    - pip
+    - setuptools
+    - wheel
+  run:
+    - python >=3.9
+
+test:
+  imports:
+    - env_repair
+  commands:
+    - env-repair --help
+
+about:
+  home: https://github.com/noragen/env-repair
+  license: MIT
+  license_file: LICENSE
+  summary: Scan and repair conda/mamba/micromamba environments with mixed conda/pip installs.
+
+extra:
+  recipe-maintainers:
+    - noragen

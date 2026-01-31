@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .subprocess_utils import run_cmd_capture, run_cmd_live, run_json_cmd
+from .subprocess_utils import run_cmd_capture, run_cmd_live, run_cmd_live_capture, run_json_cmd
 
 
 def is_conda_env(env_path):
@@ -49,6 +49,39 @@ def conda_install(env_path, packages, manager, channels, *, ignore_pinned, force
     else:
         # Some conda versions do not support `--update-deps` (mamba does).
         cmd = ["conda", "install", "-y", "-p", env_path] + force_args + pin_args + channel_args + list(packages)
+    return run_cmd_live(cmd) == 0
+
+
+def conda_install_capture(env_path, packages, manager, channels, *, ignore_pinned, force_reinstall):
+    """
+    Like `conda_install` but returns (ok, stdout, stderr) while still streaming output live.
+    """
+    if not packages:
+        return True, "", ""
+    channel_args = []
+    for ch in channels or []:
+        channel_args.extend(["-c", ch])
+    pin_args = ["--no-pin"] if ignore_pinned else []
+    force_args = ["--force-reinstall"] if force_reinstall else []
+    if manager == "micromamba":
+        cmd = ["micromamba", "install", "-y", "-p", env_path] + force_args + pin_args + channel_args + list(packages)
+    elif manager == "mamba":
+        cmd = ["mamba", "install", "-y", "-p", env_path] + force_args + pin_args + channel_args + list(packages)
+    else:
+        cmd = ["conda", "install", "-y", "-p", env_path] + force_args + pin_args + channel_args + list(packages)
+    rc, out, err = run_cmd_live_capture(cmd)
+    return rc == 0, out, err
+
+
+def conda_remove(env_path, packages, manager):
+    if not packages:
+        return True
+    if manager == "micromamba":
+        cmd = ["micromamba", "remove", "-y", "-p", env_path] + list(packages)
+    elif manager == "mamba":
+        cmd = ["mamba", "remove", "-y", "-p", env_path] + list(packages)
+    else:
+        cmd = ["conda", "remove", "-y", "-p", env_path] + list(packages)
     return run_cmd_live(cmd) == 0
 
 
