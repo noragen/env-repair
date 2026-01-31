@@ -19,8 +19,8 @@ Publishing to conda-forge is done via a **feedstock** repo.
 
 Typical flow:
 1) Ensure the version is published on PyPI.
-2) Create a PR to `conda-forge/staged-recipes` with a recipe derived from `conda.recipe/meta.yaml`,
-   but using a PyPI source URL + sha256 (required by conda-forge).
+2) Create a PR to `conda-forge/staged-recipes` with a recipe using a PyPI source URL + sha256.
+   In this repo, `conda.recipe/meta-forge.yaml` is the ready-to-copy starting point.
 3) After merge, conda-forge will create `env-repair-feedstock` automatically.
 4) Future releases are handled via version bump PRs to the feedstock (usually via `conda-forge-bot`).
 
@@ -47,3 +47,7 @@ If you want to publish to your own Anaconda channel (not conda-forge), use the w
 One-time setup:
 - Create an Anaconda token with upload permissions.
 - Add it as a GitHub Actions secret: `ANACONDA_TOKEN`.
+
+Tag-based release:
+- Pushing a tag `vX.Y.Z` will also trigger `.github/workflows/release-anaconda.yml` and upload the built conda package to your channel.
+- By default it uploads to the channel matching the GitHub repo owner (e.g. `noragen`). You can override via `workflow_dispatch` input `anaconda_user`.

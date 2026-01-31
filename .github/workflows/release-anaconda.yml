@@ -1,6 +1,9 @@
 name: Release (anaconda.org)
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       anaconda_user:
@@ -36,7 +39,7 @@ jobs:
         shell: bash -l {0}
         env:
           ANACONDA_TOKEN: ${{ secrets.ANACONDA_TOKEN }}
-          ANACONDA_USER: ${{ inputs.anaconda_user }}
+          ANACONDA_USER: ${{ inputs.anaconda_user || github.repository_owner }}
         run: |
           if [ -z "${ANACONDA_TOKEN}" ]; then
             echo "Missing ANACONDA_TOKEN secret" 1>&2
