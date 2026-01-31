@@ -1,8 +1,8 @@
-# 🩺 EnvRepair
+# 🩺 EnvRepair [![CI](https://github.com/noragen/env-repair/actions/workflows/ci.yml/badge.svg)](https://github.com/noragen/env-repair/actions/workflows/ci.yml)
 ### Fixing broken Python environments – safely, transparently, reproducibly
 
 <p align="center">
-  <img alt="EnvRepair icon" src="icons/env-repair-256x256.png" width="128" />
+  <img alt="EnvRepair icon" src="https://raw.githubusercontent.com/noragen/env-repair/83906131f0ecb478cfc4dd3a6eb724e8b2517c45/icons/env-repair-256x256.png" width="128" />
 </p>
 
 **EnvRepair** is a practical repair tool for the *messy reality* of Python environments:  
