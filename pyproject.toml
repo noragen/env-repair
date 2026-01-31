@@ -8,11 +8,11 @@ version = "0.2.0"
 description = "Scan and repair conda/mamba/micromamba environments with mixed conda/pip installs."
 readme = "README.md"
 requires-python = ">=3.9"
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Tobias"}]
 keywords = ["conda", "mamba", "micromamba", "pip", "env", "doctor"]
 classifiers = [
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
 ]

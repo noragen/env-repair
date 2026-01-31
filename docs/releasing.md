@@ -33,6 +33,7 @@ PyPI artifacts:
 - Build:
   - `python -m pip install -U build`
   - `python -m build`
+  - `python -m twine check dist\*`
 
 conda recipe:
 - `conda install -y conda-build`
