@@ -138,7 +138,10 @@ def build_parser():
         add_help=False,
     )
     vi.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
-    vi.add_argument("--env", help=t("help_env_single", lang=lang))
+    # Important: do NOT use dest="env" here, because the top-level parser also defines `--env`
+    # (multi env selection). Using the same dest causes argparse to overwrite the previously
+    # provided top-level value when the subcommand is selected.
+    vi.add_argument("--env", dest="env_single", help=t("help_env_single", lang=lang))
     vi.add_argument("--full", action="store_true", help="Check all packages (default: critical only)")
     vi.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     vi.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))

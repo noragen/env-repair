@@ -25,7 +25,6 @@ from .subprocess_utils import run_json_cmd
 PYPI_TO_CONDA_NAME_MAP = {
     # Concrete examples observed in this repo/workflow
     "msgpack": "msgpack-python",
-    "build": "python-build",
     "ccxt": "ccxt-py",
 
     # Common alias/meta packages on PyPI
@@ -52,6 +51,13 @@ PYPI_TO_CONDA_NAME_MAP = {
 FORCE_REMOVE_PIP_IF_CONDA_PRESENT = {
     "pysha3": "safe-pysha3",
 }
+
+# Packages we intentionally do NOT "adopt" from pip -> conda.
+# Example: PyPI `build` (PEP 517 frontend) is not the same thing as conda `python-build`.
+ADOPT_PIP_IGNORE = {
+    "build",
+}
+ADOPT_PIP_IGNORE_NORM = {normalize_name(x) for x in ADOPT_PIP_IGNORE}
 
 
 def _pypi_to_conda_override(pip_name):
@@ -250,7 +256,7 @@ def _resolve_adopt_pip_target(*, pip_name, available):
     Fallbacks (conservative) for common conda naming:
       - <name>-python  (pip "msgpack" -> conda "msgpack-python")
       - <name>-py      (pip "ccxt" -> conda "ccxt-py")
-      - python-<name>  (pip "build" -> conda "python-build")
+      - python-<name>
       - safe-<name>    (pip "pysha3" -> conda "safe-pysha3")
     """
     pip_norm = normalize_name(pip_name)
@@ -582,6 +588,17 @@ def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, 
     for e in pip_entries:
         pip_name = e["name"]
         pip_ver = e["version"]
+        if normalize_name(pip_name) in ADOPT_PIP_IGNORE_NORM:
+            fixes.append(
+                {
+                    "fixed": True,
+                    "method": "skip",
+                    "package": "<pip-to-conda>",
+                    "reason_key": "adopt_pip_ignored",
+                    "reason_args": {"pip": pip_name, "pip_version": pip_ver},
+                }
+            )
+            continue
         if blacklist.get(normalize_name(pip_name), {}).get(pip_ver):
             skipped_blacklist.append({"pip": pip_name, "pip_version": pip_ver})
             continue

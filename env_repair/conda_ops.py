@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .subprocess_utils import run_cmd_capture, run_cmd_live, run_cmd_live_capture, run_json_cmd
+from .subprocess_utils import run_cmd_capture, run_cmd_live, run_cmd_live_capture, run_cmd_stdout_to_file, run_json_cmd
 
 
 def is_conda_env(env_path):
@@ -97,8 +97,7 @@ def export_env_yaml(env_path, manager, out_path):
     else:
         return False
     with out_path.open("w", encoding="utf-8") as f:
-        proc = subprocess.Popen(cmd, stdout=f, stderr=sys.stderr)
-        return proc.wait() == 0
+        return run_cmd_stdout_to_file(cmd, stdout_file=f) == 0
 
 
 def env_update_from_yaml(env_path, manager, yaml_path):

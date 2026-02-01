@@ -1,7 +1,10 @@
 import concurrent.futures
+import contextlib
 import os
 import json
 import subprocess
+import signal
+import sys
 from pathlib import Path
 
 from .conda_ops import conda_install, conda_install_capture, conda_remove, get_env_package_entries, is_conda_env
@@ -26,6 +29,99 @@ CRITICAL_PACKAGES = {
 }
 
 CRITICAL_PIP_PACKAGES = {"pip", "setuptools", "wheel"}
+
+
+def _normalize_env_filters(env_arg):
+    """
+    `argparse` in this project defines `--env` both at the top-level (multi env)
+    and inside subcommands like `verify-imports` (single env). Depending on where
+    the user places the flag, `args.env` may be a string, a list, or None.
+    """
+    if env_arg is None:
+        return []
+    if isinstance(env_arg, str):
+        return [env_arg] if env_arg else []
+    if isinstance(env_arg, (list, tuple)):
+        out = []
+        for item in env_arg:
+            if isinstance(item, str) and item:
+                out.append(item)
+        return out
+    return []
+
+
+@contextlib.contextmanager
+def _ignore_sigint_windows():
+    """
+    On Windows users often press Ctrl+C multiple times. If the 2nd Ctrl+C hits while
+    the ThreadPoolExecutor is shutting down, Python may emit noisy shutdown traces.
+    Temporarily ignore SIGINT while we cleanly drain worker threads.
+    """
+    if os.name != "nt":
+        yield
+        return
+    old = signal.getsignal(signal.SIGINT)
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        yield
+    finally:
+        try:
+            signal.signal(signal.SIGINT, old)
+        except Exception:
+            pass
+
+
+def _run_import_checks_parallel(*, to_check, python_exe, max_workers, progress):
+    results = []
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    future_to_check = {}
+    try:
+        for dist_name, import_name, sp_path in to_check:
+            future_to_check[
+                executor.submit(check_import, import_name, python_exe)
+            ] = (dist_name, import_name, sp_path)
+
+        completed_count = 0
+        for future in concurrent.futures.as_completed(future_to_check):
+            dist_name, import_name, sp_path = future_to_check[future]
+            try:
+                ok, error = future.result()
+            except Exception as exc:
+                ok, error = False, str(exc)
+
+            results.append(
+                {
+                    "dist": dist_name,
+                    "dist_path": sp_path / dist_name,  # store path for fixer
+                    "import": import_name,
+                    "ok": ok,
+                    "error": error,
+                }
+            )
+
+            completed_count += 1
+            progress.update(completed_count)
+        return results
+    except KeyboardInterrupt:
+        # Cancel as much as we can, then perform a clean shutdown.
+        for fut in list(future_to_check.keys()):
+            try:
+                fut.cancel()
+            except Exception:
+                pass
+        with _ignore_sigint_windows():
+            executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    finally:
+        try:
+            progress.finish()
+        except Exception:
+            pass
+        # Normal path shutdown (in case we returned early without draining).
+        try:
+            executor.shutdown(wait=True, cancel_futures=True)
+        except Exception:
+            pass
 
 
 def _verify_imports_blacklist_path():
@@ -995,7 +1091,13 @@ def verify_imports(args):
     lang = "auto"
     
     all_envs, base_prefix, manager = discover_envs(show_json_output=show_json_output)
-    targets = select_envs(all_envs, [args.env] if args.env else [], base_prefix)
+    # Support both styles:
+    #   env-repair --env NAME verify-imports ...
+    #   env-repair verify-imports --env NAME ...
+    env_filters = _normalize_env_filters(getattr(args, "env_single", None)) or _normalize_env_filters(
+        getattr(args, "env", None)
+    )
+    targets = select_envs(all_envs, env_filters, base_prefix)
     
     if not targets:
         return {"ok": False, "exit_code": 2, "error": "no target env"}
@@ -1016,11 +1118,13 @@ def verify_imports(args):
          return {"ok": False, "exit_code": 2, "error": "missing site-packages"}
     
     to_check = []
+    dist_info_dirs = 0
     for sp_path in site_pkgs:
         sp = Path(sp_path)
         if not sp.exists():
             continue
         dists = list(sp.glob("*.dist-info"))
+        dist_info_dirs += len(dists)
         
         for d in dists:
             # Get import names
@@ -1036,6 +1140,17 @@ def verify_imports(args):
                     
                 to_check.append((d.name, imp, sp))
     to_check = sorted(list(set(to_check)))
+
+    if not args.json:
+        # Make it explicit which env we are checking (helps diagnose user confusion).
+        print(f"Env: {env_path}")
+        print(f"Python: {python_exe}")
+        if getattr(args, "debug", False):
+            print("Site-packages:")
+            for p in site_pkgs:
+                print(f"  - {p}")
+        print(f"Distributions: {dist_info_dirs} (*.dist-info)")
+        print(f"Import targets: {len(to_check)}")
     
     if not to_check:
          # Fallback: if no critical packages found in lazy mode, warn user or check a few random ones?
@@ -1045,43 +1160,23 @@ def verify_imports(args):
             print("No import candidates found in lazy mode.")
         return {"ok": True, "exit_code": 0, "report": {"env": env_path, "checks": 0, "failures": []}}
 
-    results = []
-    
     # Parallel execution
     max_workers = min(32, (os.cpu_count() or 1) * 4) 
     print(f"Verifying {len(to_check)} imports using {max_workers} threads...")
     
     progress = Progress(total=len(to_check), label="Verifying imports")
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_check = {
-            executor.submit(check_import, import_name, python_exe): (dist_name, import_name, sp_path)
-            for dist_name, import_name, sp_path in to_check
-        }
-        
-        completed_count = 0
-        for future in concurrent.futures.as_completed(future_to_check):
-            dist_name, import_name, sp_path = future_to_check[future]
-            try:
-                ok, error = future.result()
-            except Exception as exc:
-                ok, error = False, str(exc)
-            
-            results.append(
-                {
-                    "dist": dist_name,
-                    "dist_path": sp_path / dist_name,  # store path for fixer
-                    "import": import_name,
-                    "ok": ok,
-                    "error": error,
-                }
-            )
-            
-            completed_count += 1
-            progress.update(completed_count)
+    try:
+        results = _run_import_checks_parallel(
+            to_check=to_check,
+            python_exe=python_exe,
+            max_workers=max_workers,
+            progress=progress,
+        )
+    except KeyboardInterrupt:
+        # Avoid ugly interpreter shutdown noise if user interrupts mid-flight.
+        print("\nInterrupted verify-imports; waiting for running checks to stop...", file=sys.stderr)
+        raise
 
-    progress.finish()
-    
     failures = [r for r in results if not r["ok"]]
 
     if not args.json:
