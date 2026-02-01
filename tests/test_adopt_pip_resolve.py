@@ -15,7 +15,8 @@ class TestAdoptPipResolve(unittest.TestCase):
         self.assertEqual(PYPI_TO_CONDA_NAME_MAP.get("python-levenshtein"), "levenshtein")
 
     def test_pypi_to_conda_override_is_case_insensitive(self):
-        self.assertEqual(_pypi_to_conda_override("Build"), "python-build")
+        # PyPI `build` is not adopted to conda `python-build` (different project).
+        self.assertIsNone(_pypi_to_conda_override("Build"))
         self.assertEqual(_pypi_to_conda_override("opencv-PYTHON"), "opencv")
 
     def test_core_pattern_replaces_separators(self):
@@ -50,8 +51,8 @@ class TestAdoptPipResolve(unittest.TestCase):
         self.assertEqual(_resolve_adopt_pip_target(pip_name="msgpack", available=available), "msgpack-python")
 
     def test_resolves_python_prefix_alias(self):
-        available = {"python-build", "other"}
-        self.assertEqual(_resolve_adopt_pip_target(pip_name="build", available=available), "python-build")
+        available = {"python-foo", "other"}
+        self.assertEqual(_resolve_adopt_pip_target(pip_name="foo", available=available), "python-foo")
 
     def test_resolves_py_suffix_alias(self):
         available = {"ccxt-py", "other"}

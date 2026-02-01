@@ -3,11 +3,13 @@
 ## PyPI (via GitHub Actions / Trusted Publishing)
 
 1) Bump version in `pyproject.toml`.
-2) Update `CHANGELOG.md`.
-3) Create and push a tag:
+2) Sync conda recipe versions (optional but recommended):
+   - `python tools\sync_versions.py`
+3) Update `CHANGELOG.md`.
+4) Create and push a tag:
    - `git tag vX.Y.Z`
    - `git push --tags`
-4) The workflow `.github/workflows/release-pypi.yml` builds and publishes to PyPI.
+5) The workflow `.github/workflows/release-pypi.yml` builds and publishes to PyPI.
 
 PyPI setup (one-time):
 - Create the project on PyPI (first manual upload or via the UI).
@@ -19,10 +21,15 @@ Publishing to conda-forge is done via a **feedstock** repo.
 
 Typical flow:
 1) Ensure the version is published on PyPI.
-2) Create a PR to `conda-forge/staged-recipes` with a recipe using a PyPI source URL + sha256.
-   In this repo, `conda.recipe/meta-forge.yaml` is the ready-to-copy starting point.
-3) After merge, conda-forge will create `env-repair-feedstock` automatically.
-4) Future releases are handled via version bump PRs to the feedstock (usually via `conda-forge-bot`).
+2) Sync this repo's conda recipe metadata to the current PyPI version:
+   - `python tools\sync_versions.py`
+   - (recommended for conda-forge, to also update `sha256` from the exact PyPI sdist): `python tools\sync_versions.py --pypi-sdist`
+   - (offline fallback): `python tools\sync_versions.py --sdist dist\env_repair-X.Y.Z.tar.gz`
+3) Create a PR to `conda-forge/staged-recipes` with a recipe using a PyPI source URL + sha256.
+   After the sync, copy `conda.recipe/meta-forge.yaml` into your staged-recipes checkout at:
+   - `staged-recipes/recipes/env-repair/meta.yaml`
+4) After merge, conda-forge will create `env-repair-feedstock` automatically.
+5) Future releases are handled via version bump PRs to the feedstock (usually via `conda-forge-bot`).
 
 ## Local builds
 

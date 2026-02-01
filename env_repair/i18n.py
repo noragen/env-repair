@@ -113,6 +113,7 @@ MESSAGES = {
         "reason_adopt_skip_keep": "keep {pip} (pip {pip_version}) because conda {conda} version is {conda_version}",
         "reason_adopt_pip_uninstall": "remove pip duplicates after conda install (only when versions match)",
         "reason_adopt_pip_force_uninstall": "remove pip package because a conda replacement is present",
+        "adopt_pip_ignored": "skip (explicitly ignored for adoption)",
         "reason_adopt_conda_relink": "relink conda packages after pip uninstall",
     },
     "de": {
@@ -225,6 +226,7 @@ MESSAGES = {
         "reason_adopt_skip_keep": "{pip} behalten (pip {pip_version}), weil conda {conda} Version {conda_version} hat",
         "reason_adopt_pip_uninstall": "pip-Duplikate nach conda Install entfernen (nur wenn Versionen matchen)",
         "reason_adopt_pip_force_uninstall": "pip-Paket entfernen, weil conda-Ersatz bereits vorhanden ist",
+        "adopt_pip_ignored": "skip (bewusst von Adoption ausgeschlossen)",
         "reason_adopt_conda_relink": "conda Pakete nach pip-Uninstall erneut relinken",
     },
 }

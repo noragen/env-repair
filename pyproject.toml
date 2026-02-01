@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "env-repair"
-version = "0.2.2"
+version = "0.2.3"
 description = "Scan and repair conda/mamba/micromamba environments with mixed conda/pip installs."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,7 +21,7 @@ classifiers = [
 env-repair = "env_repair.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "build>=1.0"]
 
 [tool.setuptools]
 packages = ["env_repair"]

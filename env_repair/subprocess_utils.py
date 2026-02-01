@@ -228,3 +228,35 @@ def run_json_cmd(cmd, *, show_json_output):
         return json.loads("".join(out_buf))
     except ValueError:
         return None
+
+
+def run_cmd_stdout_to_file(cmd, *, stdout_file):
+    """
+    Run a command and write its stdout directly to the given file object.
+
+    This is primarily used for commands like `conda env export` where stdout can
+    be large and should not be buffered in memory.
+    """
+    if _should_print_cmd(cmd):
+        _print_cmd(cmd)
+    try:
+        proc = subprocess.Popen(cmd, stdout=stdout_file, stderr=sys.stderr)
+    except FileNotFoundError:
+        if os.name == "nt":
+            proc = subprocess.Popen(_as_cmd_exe(cmd), stdout=stdout_file, stderr=sys.stderr)
+        else:
+            raise
+    except KeyboardInterrupt as e:
+        raise OperationInterrupted(cmd, returncode=130) from e
+    try:
+        return proc.wait()
+    except KeyboardInterrupt as e:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        raise OperationInterrupted(cmd, returncode=130) from e
