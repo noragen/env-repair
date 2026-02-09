@@ -51,7 +51,8 @@ It steps in **after things already went wrong**.
 
 ## 🧰 Requirements
 - Windows, Linux, or macOS.
-- `mamba` in PATH for conda-style envs (preferred). `conda`/`micromamba` also work in many cases.
+- `mamba` in PATH for conda-style envs (preferred). `conda`/`micromamba` are supported when available.
+- `conda` is optional: mamba-only installs (e.g. Mambaforge/Miniforge variants) are supported.
 - Python available in the target environment.
 
 ---
@@ -192,6 +193,12 @@ Full scan + auto-fix (recommended when an env is “mostly working but randomly 
 python env_repair.py verify-imports --env base --full --fix --debug
 ```
 
+Both `--env` placements are supported:
+```bat
+env-repair --env base verify-imports --full --fix
+env-repair verify-imports --env base --full --fix
+```
+
 Notes:
 - Repairs use **batched** conda/mamba operations (no slow one-by-one reinstalls).
 - If the solver fails for a specific package, EnvRepair retries the batch without the offending spec and remembers it in:
@@ -210,6 +217,18 @@ python -m unittest discover -s tests -p "test_*.py"
 JSON output:
 ```bat
 python env_repair.py --env base --json
+```
+
+Release helper (patch bump in `pyproject.toml`):
+```bat
+python release.py
+python release.py --sync
+```
+
+Sync conda recipe metadata from project version:
+```bat
+python tools\sync_versions.py
+python tools\sync_versions.py --pypi-sdist --staged-recipes staged-recipes
 ```
 
 ---

@@ -479,7 +479,12 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
     blacklist = _load_verify_imports_blacklist()
     blocked_for_py = blacklist.get(pyver) or {}
     blocked_names = set(blocked_for_py.keys())
-    configured_channels = load_conda_channels(base_prefix=base_prefix, has_conda=which("conda") is not None, show_json_output=debug)
+    configured_channels = load_conda_channels(
+        base_prefix=base_prefix,
+        has_conda=which("conda") is not None,
+        has_mamba=which("mamba") is not None,
+        show_json_output=debug,
+    )
     nodefaults = "nodefaults" in configured_channels
     has_defaults = ("defaults" in configured_channels) or ("anaconda" in configured_channels)
 
