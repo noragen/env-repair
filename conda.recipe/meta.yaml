@@ -1,5 +1,5 @@
 {% set name = "env-repair" %}
-{% set version = "0.2.3" %} # synced from pyproject.toml via tools/sync_versions.py
+{% set version = "0.2.4" %} # synced from pyproject.toml via tools/sync_versions.py
 {% set sdist_name = name.replace("-", "_") %}  
 
 package:

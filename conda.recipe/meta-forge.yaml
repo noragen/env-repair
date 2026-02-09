@@ -1,5 +1,5 @@
 {% set name = "env-repair" %}
-{% set version = "0.2.3" %}
+{% set version = "0.2.4" %}
 {% set sdist_name = name.replace("-", "_") %}
 {% set pypi_first = name[0] %}
 
@@ -9,7 +9,7 @@ package:
 
 source:
   url: https://files.pythonhosted.org/packages/source/{{ pypi_first }}/{{ name }}/{{ sdist_name }}-{{ version }}.tar.gz
-  sha256: dafceedb5c699a5591437f37ae62b9984c23585d7f49ba25817cf2877dfb1fa0
+  sha256: 6d9a44e77f7b80980bb97a248f4ce3dfdbcb2864034fa6b6d529fbc5f0b6846d
 
 build:
   noarch: python

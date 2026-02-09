@@ -40,12 +40,18 @@ def load_conda_channels_from_condarc(*, base_prefix=None):
     return []
 
 
-def load_conda_channels(*, base_prefix=None, has_conda, show_json_output):
+def load_conda_channels(*, base_prefix=None, has_conda, has_mamba=False, show_json_output=False):
     channels = load_conda_channels_from_condarc(base_prefix=base_prefix)
     if channels:
         return channels
     if has_conda:
         data = run_json_cmd(["conda", "config", "--show", "channels", "--json"], show_json_output=show_json_output)
+        if data:
+            channels = data.get("channels") or []
+            return [c for c in channels if isinstance(c, str)]
+    if has_mamba:
+        # Miniforge can ship mamba without conda.
+        data = run_json_cmd(["mamba", "config", "list", "--json"], show_json_output=show_json_output)
         if data:
             channels = data.get("channels") or []
             return [c for c in channels if isinstance(c, str)]

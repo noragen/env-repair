@@ -546,7 +546,12 @@ def run(args):
     channels = []
     if not args.no_channels_from_condarc:
         channels.extend(
-            load_conda_channels(base_prefix=base_prefix, has_conda=which("conda") or which("mamba"), show_json_output=show_json_output)
+            load_conda_channels(
+                base_prefix=base_prefix,
+                has_conda=which("conda"),
+                has_mamba=which("mamba"),
+                show_json_output=show_json_output,
+            )
         )
     if args.channel:
         channels.extend(args.channel)

@@ -44,7 +44,13 @@ def discover_envs(*, show_json_output):
             for p in info["envs"]:
                 add_env(envs, p)
         if info:
-            base_prefix = info.get("base_prefix") or info.get("root_prefix") or base_prefix
+            # mamba reports this as "base environment" in some versions.
+            base_prefix = (
+                info.get("base_prefix")
+                or info.get("root_prefix")
+                or info.get("base environment")
+                or base_prefix
+            )
             if manager is None:
                 manager = cmd
 

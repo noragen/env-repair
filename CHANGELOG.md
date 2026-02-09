@@ -5,14 +5,19 @@
 - Docs: prefer `mamba` in command examples (keep `conda` as fallback where needed).
 - Core env scan and repair workflow.
 - Adopt-pip flow with conda mapping and fallback checks.
-- Adopt-pip: reduced `mamba search` combinatorics (2-pass search) and added explicit PyPI→conda name overrides (e.g. `msgpack`→`msgpack-python`, `build`→`python-build`, `ccxt`→`ccxt-py`).
+- Adopt-pip: reduced `mamba search` combinatorics (2-pass search) and added explicit PyPI→conda name overrides (e.g. `msgpack`→`msgpack-python`, `ccxt`→`ccxt-py`).
+- Adopt-pip: `build` is now explicitly ignored for pip→conda adoption (`build` != `python-build`).
 - Adopt-pip: solver-fail handling now skips offending packages, retries the batch, and remembers failures in `.env_repair/adopt_pip_blacklist.json`.
 - Verify-imports: `verify-imports --full --fix` with dependency-first repair stage, batched conda reinstalls, and solver-offender skipping + persistent blacklist in `.env_repair/verify_imports_blacklist.json`.
 - Verify-imports: better handling of “unfixable” cases (platform-only imports like `sh`/`ptyprocess`, crashing imports like `PySimpleGUI`, obsolete packages like `idna_ssl`).
+- Verify-imports: fixed env selection for `--env` before/after subcommand (`env-repair --env X verify-imports ...` and `env-repair verify-imports --env X ...`).
+- Verify-imports: cleaner Ctrl+C handling during parallel import checks.
 - Fix loops: avoid pointless pip-uninstall+conda-reinstall for conda-owned dist-info (e.g. `PyDrive`/`pydrive` case-conflicts).
 - Debug output and progress indicators.
 - Debug: show exact `mamba/conda/...` command lines (`[cmd] ...`) and stream stdout/stderr live for transparency.
 - Support plain `venv`/`virtualenv` envs via `--env <path>` (pip-only scan/fix).
+- Mamba-only support: channel loading now falls back to `mamba config list --json` when `conda` is not installed.
+- Mamba-only support: base env detection now also reads `mamba info --json` key `base environment`.
 - Ctrl+C handling during installs: no traceback, rescue snapshot + interactive restore/continue/abort prompt, state saved to `.env_repair/state.json`.
 - Localized CLI output (auto-detected from system locale).
 - Localized `--help` / subcommand help text (auto-detected from system locale).
@@ -25,3 +30,5 @@
 - Added `diagnose-ssl` advisor (checks `import ssl` in env/base and prints guidance).
 - CI: GitHub Actions workflow for unit tests and sdist/wheel build checks.
 - Release: GitHub Actions workflows for PyPI (Trusted Publishing) and optional anaconda.org upload; local conda-build recipe for testing feedstock packaging.
+- Release tooling: added `release.py` (patch bump + optional sync) and `tools/sync_versions.py` staged-recipes copy support.
+- Release tooling: `tools/sync_versions.py --pypi-sdist` hashes the exact PyPI sdist to avoid local-vs-PyPI `sha256` mismatches.
