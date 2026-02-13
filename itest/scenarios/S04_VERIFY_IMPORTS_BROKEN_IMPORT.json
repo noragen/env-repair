@@ -1,0 +1,21 @@
+{
+  "id": "S04_VERIFY_IMPORTS_BROKEN_IMPORT",
+  "description": "Poison a real import by deleting a file in site-packages; verify-imports should detect the broken import (expected rc=1).",
+  "python": "3.10",
+  "conda_packages": ["pip", "setuptools", "wheel"],
+  "pip_packages": ["requests==2.31.0"],
+  "poison": {
+    "kind": "delete_file",
+    "site_packages_rel": "requests/api.py"
+  },
+  "env_repair": {
+    "pipeline": [
+      {"args": ["--fix", "--debug"]},
+      {"subcommand": "verify-imports", "args": ["--full", "--debug"], "ok_rc": [0, 1]}
+    ]
+  },
+  "verify": {
+    "import_ok": "pip",
+    "expect_verify_imports_rc": 1
+  }
+}

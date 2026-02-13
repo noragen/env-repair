@@ -1,0 +1,30 @@
+{
+  "id": "S05_INCONSISTENT_SAFE",
+  "description": "Create a deterministic solver inconsistency via --no-deps (python_abi mismatch), run fix-inconsistent --level safe, then reconcile to verify inconsistency is gone.",
+  "python": "3.10",
+  "conda_packages": ["pip", "setuptools", "wheel"],
+  "pip_packages": [],
+  "poison": {
+    "kind": "install_no_deps",
+    "specs": ["python_abi=3.12"]
+  },
+  "env_repair": {
+    "pipeline": [
+      {"subcommand": "fix-inconsistent", "args": ["--level", "safe", "-y", "--debug"]}
+    ]
+  },
+  "repair": {
+    "kind": "install_specs",
+    "specs": ["python_abi=3.10"],
+    "force_reinstall": true
+  },
+  "verify": {
+    "expectedIssues": [
+      {
+        "type": "solver-inconsistent",
+        "before": {"min": 1},
+        "after": {"max": 0}
+      }
+    ]
+  }
+}

@@ -5,6 +5,7 @@ import json
 import subprocess
 import signal
 import sys
+from urllib.parse import urlparse
 from pathlib import Path
 
 from .conda_ops import conda_install, conda_install_capture, conda_remove, get_env_package_entries, is_conda_env
@@ -203,6 +204,45 @@ def _installed_by(dist_info):
     return "unknown"
 
 
+def _dist_has_local_direct_url(dist_info):
+    path = dist_info / "direct_url.json"
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    url = data.get("url")
+    if not isinstance(url, str) or not url:
+        return False
+    parsed = urlparse(url)
+    return parsed.scheme.lower() == "file"
+
+
+def _should_skip_local_unmanaged_dist(dist_info, *, kind):
+    return kind == "unknown" and _dist_has_local_direct_url(dist_info)
+
+
+def _is_numba_llvmlite_version_error(error):
+    if not error:
+        return False
+    e = str(error).lower()
+    return "numba requires at least version" in e and "of llvmlite" in e
+
+
+def _is_blacklist_skip_active(*, kind, name, blocked_names, initially_installed):
+    if kind != "conda" or not name:
+        return False
+    key = normalize_name(name)
+    if key not in blocked_names:
+        return False
+    # If the package is already conda-installed in this env, allow one more reinstall attempt.
+    # This avoids stale blacklist entries permanently suppressing repair of installable packages.
+    return key not in initially_installed
+
+
 def _classify_dist(dist_info, *, conda_entries_by_name):
     dist_name = _read_metadata_name(dist_info) or dist_info.name.split("-")[0]
     key = normalize_name(dist_name)
@@ -391,6 +431,13 @@ def _extract_solver_offenders(output_text):
     return offenders
 
 
+def _is_python_pin_conflict(output_text):
+    if not output_text:
+        return False
+    t = output_text.lower()
+    return ("pin on python" in t) and ("conflicts with any installable versions" in t)
+
+
 def _should_skip_failure(f):
     err = (f.get("error") or "").lower()
     name = (f.get("import") or "").lower()
@@ -567,9 +614,25 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
             plan.append({"dist": dist_info.name, "kind": "skip", "name": None, "import": failed_import, "reason": "platform/expected"})
             continue
         kind, name = _classify_dist(dist_info, conda_entries_by_name=conda_entries_by_name)
+        if _dist_has_local_direct_url(dist_info) and normalize_name(name or "") not in conda_entries_by_name:
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "skip",
+                    "name": None,
+                    "import": failed_import,
+                    "reason": "installed from local file/path (direct_url=file://) and has no conda-managed equivalent; skip auto-reinstall",
+                }
+            )
+            continue
 
         # The verify-imports blacklist is about conda solver failures. Do not block pip repairs.
-        if kind == "conda" and name and normalize_name(name) in blocked_names:
+        if _is_blacklist_skip_active(
+            kind=kind,
+            name=name,
+            blocked_names=blocked_names,
+            initially_installed=initially_installed,
+        ):
             # If an import is crashing the interpreter, prefer removing the package rather than looping forever.
             err_lower = (f.get("error") or "").lower()
             if "fatal python error" in err_lower:
@@ -638,6 +701,29 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                     }
                 )
                 continue
+
+        # Numba import may fail due to stale llvmlite, even when `numba` itself is present.
+        # Reinstall llvmlite explicitly from conda to satisfy numba runtime requirement.
+        if kind == "conda" and name and normalize_name(name) == "numba" and _is_numba_llvmlite_version_error(f.get("error")):
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "llvmlite",
+                    "import": failed_import,
+                    "reason": "numba import requires newer llvmlite; reinstalling llvmlite",
+                }
+            )
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": name,
+                    "import": failed_import,
+                    "reason": "relink numba after llvmlite update",
+                }
+            )
+            continue
 
         # attrdict is archived/inactive and breaks on modern Python because collections.Mapping was removed.
         # Replace it with attrdict3 (drop-in fork) when we see this signature.
@@ -816,8 +902,23 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
             if ok_group:
                 return group, []
 
+            merged = (out or "") + "\n" + (err or "")
+            if _is_python_pin_conflict(merged):
+                print("Solver hit pinned-python conflict; retrying without --force-reinstall to allow compatible upgrades...")
+                ok_upgrade, out_up, err_up = conda_install_capture(
+                    env_path,
+                    group,
+                    manager,
+                    configured_channels,
+                    ignore_pinned=False,
+                    force_reinstall=False,
+                )
+                if ok_upgrade:
+                    return group, []
+                merged = (out_up or "") + "\n" + (err_up or "")
+
             # If libmamba explicitly names offender specs, blacklist and retry without them.
-            offenders = sorted({p for p in _extract_solver_offenders((out or "") + "\n" + (err or "")) if p in set(group)})
+            offenders = sorted({p for p in _extract_solver_offenders(merged) if p in set(group)})
             if offenders:
                 for off in offenders:
                     _blacklist_add(blacklist, pyver=pyver, conda_name=off, reason="solver_incompatible")
@@ -1015,6 +1116,7 @@ def parse_record_file(record_path):
         return set()
 
     top_levels = set()
+    import_like_suffixes = (".py", ".pyd", ".so", ".dylib")
     for line in content.splitlines():
         # RECORD format: path,sha256=...,size
         parts = line.split(",")
@@ -1033,6 +1135,9 @@ def parse_record_file(record_path):
         
         # Start of path is usually the package name
         if "/" in path:
+            lowered = path.lower()
+            if not (lowered.endswith(import_like_suffixes) or lowered.endswith("/__init__.py")):
+                continue
             top = path.split("/")[0]
             # Ignore __pycache__
             if top == "__pycache__":
@@ -1042,8 +1147,9 @@ def parse_record_file(record_path):
                 top_levels.add(top)
         else:
             # File in root (e.g. 'six.py')
-            if path.endswith(".py"):
-                top_levels.add(path[:-3])
+            lower = path.lower()
+            if lower.endswith(import_like_suffixes):
+                top_levels.add(Path(path).stem)
                 
     return sorted(top_levels)
 
@@ -1138,6 +1244,8 @@ def verify_imports(args):
                 if not getattr(args, "full", False):
                     if imp.lower() not in CRITICAL_PACKAGES:
                         continue
+                if imp.startswith("_"):
+                    continue
                 
                 # Skip invalid identifiers (e.g. ujson-stubs)
                 if not imp.isidentifier():

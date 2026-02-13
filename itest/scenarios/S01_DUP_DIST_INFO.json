@@ -1,0 +1,18 @@
+{
+  "id": "S01_DUP_DIST_INFO",
+  "description": "Create a conda env, install a pip package, then create a duplicate dist-info folder to simulate leftovers.",
+  "python": "3.10",
+  "conda_packages": ["pip", "setuptools", "wheel"],
+  "pip_packages": ["requests==2.31.0"],
+  "poison": {
+    "kind": "duplicate_dist_info",
+    "target_dist_info_glob": "requests-*.dist-info",
+    "fake_version": "9.9.9"
+  },
+  "env_repair": {
+    "args": ["--fix", "--debug"]
+  },
+  "verify": {
+    "expect_issue_cleared": "duplicate-dist-info"
+  }
+}

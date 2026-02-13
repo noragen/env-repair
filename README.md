@@ -62,6 +62,11 @@ It steps in **after things already went wrong**.
 > All examples below use Windows `cmd.exe` syntax (`.bat` blocks).  
 > Adjust paths/shells as needed for Linux/macOS.
 
+Recommended first run (one-shot):
+```bat
+env-repair one-shot --env base -y
+```
+
 Basic scan (auto-discovers conda envs):
 ```bat
 python env_repair.py
@@ -81,6 +86,11 @@ pip install .
 ---
 
 ## 🔁 Common Workflows
+
+One-shot repair flow (recommended):
+```bat
+env-repair one-shot --env base -y
+```
 
 Fix `base`:
 ```bat
@@ -199,11 +209,17 @@ env-repair --env base verify-imports --full --fix
 env-repair verify-imports --env base --full --fix
 ```
 
+If you want the full sequence in one command (`fix-inconsistent` + scan/fix + `verify-imports --fix`):
+```bat
+env-repair one-shot --env base -y
+```
+
 Notes:
 - Repairs use **batched** conda/mamba operations (no slow one-by-one reinstalls).
 - If the solver fails for a specific package, EnvRepair retries the batch without the offending spec and remembers it in:
   - `.env_repair\verify_imports_blacklist.json`
 - Platform-only modules are skipped (e.g. `sh` on Windows, `ptyprocess` missing `fcntl` on Windows).
+- Local/manual installs from `direct_url=file://...` without a conda-managed equivalent are skipped in auto-repair.
 
 ---
 
@@ -241,6 +257,15 @@ python tools\sync_versions.py --pypi-sdist --staged-recipes staged-recipes
 - For alias-like mappings (e.g. pip `msgpack` → conda `msgpack-python`), pip is only removed if both versions match.
 - Channels are loaded from `.condarc` first, then `defaults` and `anaconda` unless disabled.
 - `--debug` prints the exact external command lines as `[cmd] ...` (mamba/conda/pip), and streams live output to keep long operations transparent.
+
+### Mini Troubleshooting
+
+| Signal in output | Meaning | Recommended next step |
+|---|---|---|
+| `skip [installed from local file/path (direct_url=file://...)]` | Package was installed from a local/custom artifact (manual wheel/build). | Keep as-is or reinstall manually from your local source if needed. |
+| `skip [blacklisted for python X.Y ...]` | Previous solver run marked this package as incompatible for this Python version/channel set. | Re-run after channel/version changes, or remove the entry from `.env_repair\verify_imports_blacklist.json` to retry once. |
+| `Solver hit pinned-python conflict; retrying without --force-reinstall...` | `--force-reinstall` could not satisfy pinned Python constraints. | Usually safe to continue; env-repair already retries with upgrade-friendly solver behavior. |
+| `Post-fix: all non-skipped imports OK.` | Automatic repair succeeded for everything that is auto-fixable. | Review skipped imports; handle only those manually if they matter for your workload. |
 
 ---
 

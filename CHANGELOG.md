@@ -26,6 +26,7 @@
 - Added `rebuild` subcommand (export/import into new env) with optional verification (`--verify`) and confirmation (`-y`).
 - Added `diagnose-clobber` subcommand (parse ClobberError logs + conda owner lookup).
 - Added `diagnose-inconsistent` and `fix-inconsistent` (levels: safe/normal/rebuild).
+- Added `one-shot` subcommand to run `fix-inconsistent` + scan/fix + `verify-imports --fix` in one command.
 - Added `cache-check` and `cache-fix` (levels: safe/targeted/aggressive, confirmation via `-y`).
 - Added `diagnose-ssl` advisor (checks `import ssl` in env/base and prints guidance).
 - CI: GitHub Actions workflow for unit tests and sdist/wheel build checks.

@@ -148,10 +148,17 @@ def scan_conda_meta_json(env_path):
             )
             continue
         if "depends" not in data:
-            # Some conda-meta records legitimately omit `depends` (e.g. certain noarch/helper packages).
-            # Only flag as broken if the record also looks incomplete.
+            # Some helper/ABI records can legitimately omit `depends`.
+            # Treat missing `depends` as broken when the record otherwise looks like a
+            # real package metadata record (not just a minimal helper marker).
+            noarch = data.get("noarch")
+            is_platform_record = not bool(noarch)
+            looks_real_record = any(
+                k in data for k in ("subdir", "files", "url", "channel", "md5", "sha256", "build_number")
+            )
             required = ("name", "version", "build")
-            if not all(k in data for k in required):
+            is_incomplete = not all(k in data for k in required)
+            if is_incomplete or (is_platform_record and looks_real_record):
                 issues.append(
                     {
                         "type": "conda-meta-missing-depends",

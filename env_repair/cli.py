@@ -19,6 +19,106 @@ from .subprocess_utils import OperationInterrupted
 from .i18n import t
 
 
+def _normalize_single_env_arg(args):
+    env_single = getattr(args, "env_single", None)
+    if isinstance(env_single, str) and env_single:
+        return env_single
+
+    env_multi = getattr(args, "env", None)
+    if isinstance(env_multi, str) and env_multi:
+        return env_multi
+    if isinstance(env_multi, (list, tuple)):
+        for value in env_multi:
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def one_shot(args):
+    env_target = _normalize_single_env_arg(args)
+    if not env_target:
+        return {"ok": False, "exit_code": 2, "error": "no target env for one-shot"}
+
+    if bool(getattr(args, "plan", False)):
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "report": {
+                "env": env_target,
+                "planned": True,
+                "steps": [
+                    {"name": "fix-inconsistent", "level": getattr(args, "level", "safe")},
+                    {"name": "scan-fix", "adopt_pip": bool(getattr(args, "adopt_pip", False))},
+                    {"name": "verify-imports", "full": not bool(getattr(args, "critical_only", False)), "fix": True},
+                ],
+            },
+        }
+
+    if not getattr(args, "json", False):
+        print(f"One-shot: {env_target}")
+
+    fix_inc_args = argparse.Namespace(
+        env=env_target,
+        level=getattr(args, "level", "safe"),
+        plan=bool(getattr(args, "plan", False)),
+        yes=bool(getattr(args, "yes", False)),
+        json=bool(getattr(args, "json", False)),
+        debug=bool(getattr(args, "debug", False)),
+    )
+    if not getattr(args, "json", False):
+        print("[1/3] fix-inconsistent")
+    fix_inc_result = fix_inconsistent(fix_inc_args)
+
+    run_args = argparse.Namespace(
+        env=[env_target],
+        fix=True,
+        adopt_pip=bool(getattr(args, "adopt_pip", False)),
+        keep_pip=bool(getattr(args, "keep_pip", False)),
+        prefer=getattr(args, "prefer", "auto"),
+        pip_fallback=bool(getattr(args, "pip_fallback", False)),
+        no_pip_fallback=bool(getattr(args, "no_pip_fallback", False)),
+        channel=list(getattr(args, "channel", []) or []),
+        no_channels_from_condarc=bool(getattr(args, "no_channels_from_condarc", False)),
+        no_default_channels=bool(getattr(args, "no_default_channels", False)),
+        ignore_pinned=bool(getattr(args, "ignore_pinned", False)),
+        force_reinstall=bool(getattr(args, "force_reinstall", False)),
+        snapshot=getattr(args, "snapshot", None),
+        json=bool(getattr(args, "json", False)),
+        debug=bool(getattr(args, "debug", False)),
+    )
+    if not getattr(args, "json", False):
+        print("[2/3] scan + fix")
+    run_result = run(run_args)
+
+    verify_args = argparse.Namespace(
+        env=[],
+        env_single=env_target,
+        full=not bool(getattr(args, "critical_only", False)),
+        json=bool(getattr(args, "json", False)),
+        debug=bool(getattr(args, "debug", False)),
+        fix=True,
+    )
+    if not getattr(args, "json", False):
+        print("[3/3] verify-imports --fix")
+    verify_result = verify_imports(verify_args)
+
+    step_results = {
+        "fix_inconsistent": fix_inc_result,
+        "scan_fix": run_result,
+        "verify_imports": verify_result,
+    }
+    ok = bool(fix_inc_result.get("ok")) and bool(run_result.get("ok")) and bool(verify_result.get("ok"))
+    exit_code = max(
+        int(fix_inc_result.get("exit_code", 0) or 0),
+        int(run_result.get("exit_code", 0) or 0),
+        int(verify_result.get("exit_code", 0) or 0),
+    )
+    if ok:
+        exit_code = 0
+
+    return {"ok": ok, "exit_code": exit_code, "report": {"env": env_target, "steps": step_results}}
+
+
 def build_parser():
     lang = "auto"
     p = argparse.ArgumentParser(
@@ -95,6 +195,32 @@ def build_parser():
     fi.add_argument("-y", "--yes", action="store_true", help=t("help_yes", lang=lang))
     fi.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     fi.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
+
+    osr = sub.add_parser(
+        "one-shot",
+        help="Run fix-inconsistent + scan/fix + verify-imports in one command",
+        description="Run fix-inconsistent + scan/fix + verify-imports in one command",
+        add_help=False,
+    )
+    osr.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
+    osr.add_argument("--env", dest="env_single", help=t("help_env_single", lang=lang))
+    osr.add_argument("--level", choices=["safe", "normal", "rebuild"], default="safe", help=t("help_level_inconsistent", lang=lang))
+    osr.add_argument("--plan", action="store_true", help=t("help_plan", lang=lang))
+    osr.add_argument("-y", "--yes", action="store_true", help=t("help_yes", lang=lang))
+    osr.add_argument("--adopt-pip", action="store_true", help=t("help_adopt_pip", lang=lang))
+    osr.add_argument("--keep-pip", action="store_true", help=t("help_keep_pip", lang=lang))
+    osr.add_argument("--prefer", choices=["auto", "conda", "pip"], default="auto", help=t("help_prefer", lang=lang))
+    osr.add_argument("--pip-fallback", action="store_true", help=t("help_pip_fallback", lang=lang))
+    osr.add_argument("--no-pip-fallback", action="store_true", help=t("help_no_pip_fallback", lang=lang))
+    osr.add_argument("--channel", action="append", default=[], help=t("help_channel", lang=lang))
+    osr.add_argument("--no-channels-from-condarc", action="store_true", help=t("help_no_channels_from_condarc", lang=lang))
+    osr.add_argument("--no-default-channels", action="store_true", help=t("help_no_default_channels", lang=lang))
+    osr.add_argument("--ignore-pinned", action="store_true", help=t("help_ignore_pinned", lang=lang))
+    osr.add_argument("--force-reinstall", action="store_true", help=t("help_force_reinstall", lang=lang))
+    osr.add_argument("--snapshot", help=t("help_snapshot", lang=lang))
+    osr.add_argument("--critical-only", action="store_true", help="Verify imports in critical mode only")
+    osr.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
+    osr.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
 
     cc = sub.add_parser(
         "cache-check",
@@ -196,6 +322,8 @@ def main(argv=None):
             result = diagnose_inconsistent(args)
         elif args.cmd == "fix-inconsistent":
             result = fix_inconsistent(args)
+        elif args.cmd == "one-shot":
+            result = one_shot(args)
         elif args.cmd == "cache-check":
             result = cache_check(args)
         elif args.cmd == "cache-fix":

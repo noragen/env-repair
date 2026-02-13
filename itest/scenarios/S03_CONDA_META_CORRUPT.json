@@ -1,0 +1,22 @@
+{
+  "id": "S03_CONDA_META_CORRUPT",
+  "description": "Make a conda-meta JSON valid-but-broken (missing depends) so mamba still works; expect env-repair to fix via force-reinstall.",
+  "python": "3.10",
+  "conda_packages": ["pip", "setuptools", "wheel"],
+  "pip_packages": [],
+  "poison": {
+    "kind": "corrupt_conda_meta",
+    "target_glob": "python-*.json",
+    "corruption": "remove_depends"
+  },
+  "env_repair": {
+    "pipeline": [
+      {"args": ["--fix", "--debug"]},
+      {"subcommand": "verify-imports", "args": ["--full", "--debug"]}
+    ]
+  },
+  "verify": {
+    "expect_issue_present": "conda-meta-missing-depends",
+    "expect_issue_cleared": "conda-meta-missing-depends"
+  }
+}

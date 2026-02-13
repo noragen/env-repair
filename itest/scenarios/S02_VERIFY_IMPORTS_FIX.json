@@ -1,0 +1,21 @@
+{
+  "id": "S02_VERIFY_IMPORTS_FIX",
+  "description": "Run env-repair --fix first (cleanup/repair), then run verify-imports as a verification pass.",
+  "python": "3.10",
+  "conda_packages": ["pip", "setuptools", "wheel"],
+  "pip_packages": ["requests==2.31.0"],
+  "poison": {
+    "kind": "duplicate_dist_info",
+    "target_dist_info_glob": "requests-*.dist-info",
+    "fake_version": "9.9.9"
+  },
+  "env_repair": {
+    "pipeline": [
+      {"args": ["--fix", "--debug"]},
+      {"subcommand": "verify-imports", "args": ["--full", "--debug"]}
+    ]
+  },
+  "verify": {
+    "expect_issue_cleared": "duplicate-dist-info"
+  }
+}
