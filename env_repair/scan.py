@@ -46,7 +46,14 @@ def scan_pyd_duplicates(site_pkg):
         base_map.setdefault(base, []).append(name)
     for base, files in sorted(base_map.items()):
         if len(files) > 1:
-            issues.append({"type": "duplicate-pyd", "base": base, "files": sorted(files)})
+            issues.append(
+                {
+                    "type": "duplicate-pyd",
+                    "base": base,
+                    "files": sorted(files),
+                    "site_pkg": str(site_pkg),
+                }
+            )
     return issues
 
 

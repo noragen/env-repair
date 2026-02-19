@@ -1,6 +1,7 @@
 import sys
 import json
 import time
+import re
 from pathlib import Path
 from .conda_ops import (
     conda_install,
@@ -18,7 +19,7 @@ from .scan import (
     remove_invalid_artifact,
 )
 from .search_parse import parse_search_output
-from .subprocess_utils import run_json_cmd
+from .subprocess_utils import run_cmd_capture, run_json_cmd
 
 # Manual override map for PyPI package names to conda(-forge) package names.
 # Keys are normalized via `normalize_name()`.
@@ -228,6 +229,81 @@ def _cleanup_duplicate_dist_info(env, debug):
         if ok:
             env["issues"].remove(issue)
         _debug(debug, "duplicate_dist_info_cleanup", {"package": issue.get("package"), "ok": ok})
+    return fixes
+
+
+def _python_abi_tag(python_exe):
+    if not python_exe:
+        return None
+    rc, out, _err = run_cmd_capture(
+        [python_exe, "-c", "import sys;print(f'cp{sys.version_info[0]}{sys.version_info[1]}')"]
+    )
+    if rc != 0:
+        return None
+    tag = (out or "").strip().lower()
+    return tag if re.match(r"^cp\d+$", tag) else None
+
+
+def _cleanup_duplicate_pyd(env, debug):
+    """
+    Remove stale ABI .pyd files from duplicate-pyd issues.
+    Keeps the file matching the current env Python ABI tag when possible.
+    """
+    fixes = []
+    keep_tag = _python_abi_tag(env.get("python"))
+
+    for issue in list(env.get("issues") or []):
+        if issue.get("type") != "duplicate-pyd":
+            continue
+
+        site_pkg = issue.get("site_pkg")
+        files = [f for f in (issue.get("files") or []) if isinstance(f, str)]
+        if not site_pkg or not files:
+            continue
+
+        delete_candidates = []
+        if keep_tag:
+            keep_marker = f".{keep_tag}-"
+            for f in files:
+                if keep_marker not in f.lower():
+                    delete_candidates.append(f)
+        else:
+            # Fallback: keep highest cp tag, remove others.
+            by_tag = []
+            for f in files:
+                m = re.search(r"\.cp(\d+)-", f, flags=re.IGNORECASE)
+                by_tag.append((int(m.group(1)) if m else -1, f))
+            by_tag = sorted(by_tag, key=lambda x: x[0], reverse=True)
+            keep_name = by_tag[0][1] if by_tag else None
+            delete_candidates = [f for _tag, f in by_tag if f != keep_name]
+
+        ok = True
+        removed = 0
+        for fname in delete_candidates:
+            p = Path(site_pkg) / fname
+            if not p.exists():
+                continue
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                ok = False
+
+        fixes.append(
+            {
+                "fixed": ok,
+                "method": "cleanup",
+                "package": issue.get("base") or "duplicate-pyd",
+                "count": removed,
+            }
+        )
+        _debug(
+            debug,
+            "duplicate_pyd_cleanup",
+            {"base": issue.get("base"), "keep_tag": keep_tag, "removed": removed, "ok": ok},
+        )
+        if ok:
+            env["issues"].remove(issue)
     return fixes
 
 

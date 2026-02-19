@@ -72,6 +72,7 @@ def one_shot(args):
     run_args = argparse.Namespace(
         env=[env_target],
         fix=True,
+        skip_conda_core_repair=True,
         adopt_pip=bool(getattr(args, "adopt_pip", False)),
         keep_pip=bool(getattr(args, "keep_pip", False)),
         prefer=getattr(args, "prefer", "auto"),

@@ -230,6 +230,12 @@ Run tests:
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
+Run integration tests (non-interactive):
+```bat
+python itest\scripts\run_itest.py --list
+python itest\scripts\run_itest.py --scenario S01_DUP_DIST_INFO --summarize
+```
+
 JSON output:
 ```bat
 python env_repair.py --env base --json
@@ -257,6 +263,9 @@ python tools\sync_versions.py --pypi-sdist --staged-recipes staged-recipes
 - For alias-like mappings (e.g. pip `msgpack` → conda `msgpack-python`), pip is only removed if both versions match.
 - Channels are loaded from `.condarc` first, then `defaults` and `anaconda` unless disabled.
 - `--debug` prints the exact external command lines as `[cmd] ...` (mamba/conda/pip), and streams live output to keep long operations transparent.
+- If `conda` core is broken after updates, env-repair can auto-repair it in two stages: core packages first, then `python`/`menuinst` when health remains degraded or mixed ABI `.pyd` residue is detected.
+- For automated runs (CI/itest), set `ENV_REPAIR_AUTO_YES=1` to bypass interactive confirmation prompts.
+- On Windows, `duplicate-pyd` issues from mixed Python ABI residues are now cleaned directly by removing stale `.pyd` files that do not match the active ABI tag.
 
 ### Mini Troubleshooting
 

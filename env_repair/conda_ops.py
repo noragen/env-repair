@@ -1,9 +1,101 @@
+import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from .subprocess_utils import run_cmd_capture, run_cmd_live, run_cmd_live_capture, run_cmd_stdout_to_file, run_json_cmd
+
+
+def _pick_runner():
+    if shutil.which("mamba"):
+        return "mamba"
+    if shutil.which("conda"):
+        return "conda"
+    return None
+
+
+def _env_no_plugins():
+    env = dict(os.environ)
+    env.setdefault("CONDA_NO_PLUGINS", "true")
+    return env
+
+
+def _conda_info_json_capture(*, show_json_output, env=None):
+    cmd = ["conda", "info", "--json"]
+    rc, out, err = run_cmd_capture(cmd, env=env)
+    if rc != 0 or not out:
+        return None, out, err, rc
+    try:
+        return json.loads(out), out, err, rc
+    except Exception:
+        return None, out, err, rc
+
+
+def conda_health_check(*, show_json_output):
+    """
+    Return (ok, degraded, details).
+    ok=True if conda info works normally.
+    degraded=True if only works with CONDA_NO_PLUGINS.
+    """
+    if not shutil.which("conda"):
+        return True, False, {"status": "no-conda"}
+
+    data, out, err, rc = _conda_info_json_capture(show_json_output=show_json_output)
+    if data is not None:
+        return True, False, {"status": "ok"}
+
+    data_np, out_np, err_np, rc_np = _conda_info_json_capture(
+        show_json_output=show_json_output, env=_env_no_plugins()
+    )
+    if data_np is not None:
+        return False, True, {"status": "no-plugins-only", "stderr": (err or err_np or "").strip()}
+
+    # Both failed.
+    detail = (err or err_np or out or out_np or "").strip()
+    return False, False, {"status": "broken", "stderr": detail}
+
+
+def conda_repair_core(*, base_prefix, manager, channels, ignore_pinned=False, force_reinstall=True):
+    """
+    Attempt to repair a broken conda core by force-reinstalling key packages.
+    """
+    if not base_prefix or not manager:
+        return False
+    pkgs = [
+        "conda",
+        "conda-libmamba-solver",
+        "conda-package-handling",
+        "conda-package-streaming",
+        "libmamba",
+        "libmambapy",
+        "mamba",
+    ]
+    return conda_install(
+        base_prefix,
+        pkgs,
+        manager,
+        channels,
+        ignore_pinned=ignore_pinned,
+        force_reinstall=force_reinstall,
+    )
+
+
+def conda_repair_python_runtime(*, base_prefix, manager, channels, ignore_pinned=False, force_reinstall=True):
+    """
+    Attempt to repair Python runtime residue in base env after major updates.
+    """
+    if not base_prefix or not manager:
+        return False
+    return conda_install(
+        base_prefix,
+        ["python", "menuinst"],
+        manager,
+        channels,
+        ignore_pinned=ignore_pinned,
+        force_reinstall=force_reinstall,
+    )
 
 
 def is_conda_env(env_path):
@@ -177,27 +269,42 @@ def env_create_from_yaml(*, manager, src_yaml, target, target_is_path):
 
 
 def dry_run_install(env_path, packages):
-    runner = "conda" if shutil.which("conda") else ("mamba" if shutil.which("mamba") else None)
+    runner = _pick_runner()
     if not runner:
         return 1, "", "no conda/mamba"
     cmd = [runner, "install", "-y", "-p", env_path, "--dry-run"] + list(packages)
+    if runner == "conda":
+        rc, out, err = run_cmd_capture(cmd)
+        if rc != 0:
+            return run_cmd_capture(cmd, env=_env_no_plugins())
+        return rc, out, err
     return run_cmd_capture(cmd)
 
 
 def clean_index_cache(*, yes):
-    runner = "conda" if shutil.which("conda") else ("mamba" if shutil.which("mamba") else None)
+    runner = _pick_runner()
     if not runner:
         return False
     cmd = [runner, "clean", "--index-cache"]
     if yes:
         cmd.append("-y")
+    if runner == "conda":
+        rc = run_cmd_live(cmd)
+        if rc != 0:
+            rc = run_cmd_live(cmd, env=_env_no_plugins())
+        return rc == 0
     return run_cmd_live(cmd) == 0
 
 
 def conda_info_json(*, show_json_output):
-    runner = "conda" if shutil.which("conda") else ("mamba" if shutil.which("mamba") else None)
+    runner = _pick_runner()
     if not runner:
         return None
+    if runner == "conda":
+        data = run_json_cmd([runner, "info", "--json"], show_json_output=show_json_output)
+        if data is None:
+            return run_json_cmd([runner, "info", "--json"], show_json_output=show_json_output, env=_env_no_plugins())
+        return data
     return run_json_cmd([runner, "info", "--json"], show_json_output=show_json_output)
 
 
@@ -224,10 +331,15 @@ def clean_cache_level(level):
 
 
 def conda_clean(args, *, yes):
-    runner = "conda" if shutil.which("conda") else ("mamba" if shutil.which("mamba") else None)
+    runner = _pick_runner()
     if not runner:
         return False
     cmd = [runner, "clean"] + list(args)
     if yes:
         cmd.append("-y")
+    if runner == "conda":
+        rc = run_cmd_live(cmd)
+        if rc != 0:
+            rc = run_cmd_live(cmd, env=_env_no_plugins())
+        return rc == 0
     return run_cmd_live(cmd) == 0

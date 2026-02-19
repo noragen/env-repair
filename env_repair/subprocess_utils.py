@@ -51,18 +51,21 @@ def _print_cmd(cmd):
     sys.stderr.flush()
 
 
-def run_cmd_capture(cmd):
+def run_cmd_capture(cmd, *, env=None):
     """
     Run a command and capture stdout/stderr.
     Returns CompletedProcess-like tuple: (returncode, stdout, stderr).
     """
     if _should_print_cmd(cmd):
         _print_cmd(cmd)
+    run_kwargs = {"capture_output": True, "text": True, "check": False}
+    if env is not None:
+        run_kwargs["env"] = env
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        res = subprocess.run(cmd, **run_kwargs)
     except FileNotFoundError:
         if os.name == "nt":
-            res = subprocess.run(_as_cmd_exe(cmd), capture_output=True, text=True, check=False)
+            res = subprocess.run(_as_cmd_exe(cmd), **run_kwargs)
         else:
             raise
     except KeyboardInterrupt as e:
@@ -70,7 +73,7 @@ def run_cmd_capture(cmd):
     return res.returncode, res.stdout, res.stderr
 
 
-def run_cmd_live(cmd):
+def run_cmd_live(cmd, *, env=None):
     """
     Run a command and stream stdout/stderr live.
 
@@ -80,17 +83,14 @@ def run_cmd_live(cmd):
     """
     if _should_print_cmd(cmd):
         _print_cmd(cmd)
+    popen_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True, "bufsize": 1}
+    if env is not None:
+        popen_kwargs["env"] = env
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except FileNotFoundError:
         if os.name == "nt":
-            proc = subprocess.Popen(
-                _as_cmd_exe(cmd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
+            proc = subprocess.Popen(_as_cmd_exe(cmd), **popen_kwargs)
         else:
             raise
     out_buf = []
@@ -116,7 +116,7 @@ def run_cmd_live(cmd):
     return rc
 
 
-def run_cmd_live_capture(cmd):
+def run_cmd_live_capture(cmd, *, env=None):
     """
     Run a command, stream stdout/stderr live, and also return captured output.
 
@@ -124,17 +124,14 @@ def run_cmd_live_capture(cmd):
     """
     if _should_print_cmd(cmd):
         _print_cmd(cmd)
+    popen_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True, "bufsize": 1}
+    if env is not None:
+        popen_kwargs["env"] = env
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except FileNotFoundError:
         if os.name == "nt":
-            proc = subprocess.Popen(
-                _as_cmd_exe(cmd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
+            proc = subprocess.Popen(_as_cmd_exe(cmd), **popen_kwargs)
         else:
             raise
     out_buf = []
@@ -169,15 +166,18 @@ def _stream_reader(stream, sink, buffer):
             buffer.append(line)
 
 
-def run_json_cmd(cmd, *, show_json_output):
+def run_json_cmd(cmd, *, show_json_output, env=None):
     if _should_print_cmd(cmd):
         _print_cmd(cmd)
+    run_kwargs = {"capture_output": True, "text": True, "check": False}
+    if env is not None:
+        run_kwargs["env"] = env
     if not show_json_output:
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            res = subprocess.run(cmd, **run_kwargs)
         except FileNotFoundError:
             if os.name == "nt":
-                res = subprocess.run(_as_cmd_exe(cmd), capture_output=True, text=True, check=False)
+                res = subprocess.run(_as_cmd_exe(cmd), **run_kwargs)
             else:
                 raise
         except KeyboardInterrupt as e:
@@ -189,17 +189,14 @@ def run_json_cmd(cmd, *, show_json_output):
         except ValueError:
             return None
 
+    popen_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True, "bufsize": 1}
+    if env is not None:
+        popen_kwargs["env"] = env
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except FileNotFoundError:
         if os.name == "nt":
-            proc = subprocess.Popen(
-                _as_cmd_exe(cmd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
+            proc = subprocess.Popen(_as_cmd_exe(cmd), **popen_kwargs)
         else:
             raise
     out_buf = []
@@ -230,7 +227,7 @@ def run_json_cmd(cmd, *, show_json_output):
         return None
 
 
-def run_cmd_stdout_to_file(cmd, *, stdout_file):
+def run_cmd_stdout_to_file(cmd, *, stdout_file, env=None):
     """
     Run a command and write its stdout directly to the given file object.
 
@@ -239,11 +236,14 @@ def run_cmd_stdout_to_file(cmd, *, stdout_file):
     """
     if _should_print_cmd(cmd):
         _print_cmd(cmd)
+    popen_kwargs = {"stdout": stdout_file, "stderr": sys.stderr}
+    if env is not None:
+        popen_kwargs["env"] = env
     try:
-        proc = subprocess.Popen(cmd, stdout=stdout_file, stderr=sys.stderr)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except FileNotFoundError:
         if os.name == "nt":
-            proc = subprocess.Popen(_as_cmd_exe(cmd), stdout=stdout_file, stderr=sys.stderr)
+            proc = subprocess.Popen(_as_cmd_exe(cmd), **popen_kwargs)
         else:
             raise
     except KeyboardInterrupt as e:

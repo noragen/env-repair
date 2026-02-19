@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 import sys
 from pathlib import Path
@@ -7,6 +8,9 @@ from pathlib import Path
 from .conda_config import ensure_default_channels, load_conda_channels, load_pinned_specs
 from .conda_ops import (
     conda_install,
+    conda_health_check,
+    conda_repair_core,
+    conda_repair_python_runtime,
     env_update_from_yaml,
     env_create_from_yaml,
     dry_run_install,
@@ -53,6 +57,7 @@ from .repair import (
     _adopt_pip,
     _apply_same_version_case_conflicts,
     _cleanup_duplicate_dist_info,
+    _cleanup_duplicate_pyd,
     _fix_conda_meta_issues,
     _fix_duplicates,
     _remove_invalid_artifacts,
@@ -141,6 +146,9 @@ def _approve(*, yes, plan, prompt, lang):
         return False
     if yes:
         return True
+    auto_yes = os.environ.get("ENV_REPAIR_AUTO_YES", "")
+    if str(auto_yes).strip().lower() in ("1", "true", "yes", "y", "on"):
+        return True
     if not sys.stdin.isatty():
         return False
     try:
@@ -148,6 +156,114 @@ def _approve(*, yes, plan, prompt, lang):
     except KeyboardInterrupt:
         ans = ""
     return ans in ("y", "yes", "j", "ja")
+
+
+def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
+    """
+    Detect broken conda core and optionally repair it via force-reinstall.
+    Stage 2: repair python/menuinst when conda remains broken or ABI residue is detected.
+    """
+    if bool(getattr(args, "_conda_core_checked", False)):
+        return bool(getattr(args, "_conda_core_ok", True))
+
+    setattr(args, "_conda_core_checked", True)
+
+    if not base_prefix:
+        setattr(args, "_conda_core_ok", True)
+        return True
+    if not which("conda"):
+        setattr(args, "_conda_core_ok", True)
+        return True
+
+    def _has_python_abi_residue(issues):
+        cp_tag = re.compile(r"\.cp(\d+)-", flags=re.IGNORECASE)
+        for issue in issues or []:
+            if issue.get("type") != "duplicate-pyd":
+                continue
+            tags = set()
+            for filename in issue.get("files") or []:
+                if not isinstance(filename, str):
+                    continue
+                m = cp_tag.search(filename)
+                if m:
+                    tags.add(m.group(1))
+            if len(tags) > 1:
+                return True
+        return False
+
+    def _scan_base_has_abi_residue():
+        try:
+            report = scan_env(base_prefix)
+        except Exception:
+            return False
+        return _has_python_abi_residue(report.get("issues") or [])
+
+    ok, degraded, detail = conda_health_check(show_json_output=bool(getattr(args, "debug", False)))
+    abi_residue = _scan_base_has_abi_residue()
+    if ok and not abi_residue:
+        setattr(args, "_conda_core_ok", True)
+        return True
+
+    status = (detail or {}).get("status") or "broken"
+    msg = "Conda core appears broken"
+    if status == "no-plugins-only":
+        msg = "Conda core works only with plugins disabled"
+    if not args.json:
+        if not ok:
+            print(msg + ".")
+        if detail and detail.get("stderr"):
+            print(detail["stderr"])
+        if abi_residue:
+            print("Detected mixed Python ABI residue in .pyd files (e.g. cp312 + cp314).")
+
+    if not _approve(yes=bool(getattr(args, "yes", False)), plan=False, prompt=t("prompt_approve", lang="auto"), lang="auto"):
+        if not args.json:
+            print(t("abort", lang="auto"))
+        setattr(args, "_conda_core_ok", False)
+        return False
+
+    repair_manager = "mamba" if which("mamba") else manager
+    if not repair_manager:
+        setattr(args, "_conda_core_ok", False)
+        return False
+
+    ok_repair = True
+    if not ok:
+        if not args.json:
+            print("Attempting conda core repair (force-reinstall)...")
+        ok_repair = conda_repair_core(
+            base_prefix=base_prefix,
+            manager=repair_manager,
+            channels=channels,
+            ignore_pinned=False,
+            force_reinstall=True,
+        )
+        if not ok_repair and not args.json:
+            print("Conda core repair failed.")
+
+    ok_after, degraded_after, _detail_after = conda_health_check(show_json_output=bool(getattr(args, "debug", False)))
+    abi_after = _scan_base_has_abi_residue()
+    needs_stage2 = bool(abi_residue) or (not ok_after) or bool(degraded_after) or abi_after
+
+    ok_stage2 = True
+    if needs_stage2:
+        if not args.json:
+            print("Attempting Python runtime repair (force-reinstall python/menuinst)...")
+        ok_stage2 = conda_repair_python_runtime(
+            base_prefix=base_prefix,
+            manager=repair_manager,
+            channels=channels,
+            ignore_pinned=False,
+            force_reinstall=True,
+        )
+        if not ok_stage2 and not args.json:
+            print("Python runtime repair failed.")
+
+    final_ok, final_degraded, _final_detail = conda_health_check(show_json_output=bool(getattr(args, "debug", False)))
+    final_abi = _scan_base_has_abi_residue()
+    result = bool(ok_repair and ok_stage2 and final_ok and (not final_degraded) and (not final_abi))
+    setattr(args, "_conda_core_ok", result)
+    return result
 
 
 def rollback(args):
@@ -406,6 +522,21 @@ def fix_inconsistent(args):
             print(t("abort", lang=lang))
         return {"ok": False, "exit_code": 2, "aborted": True}
 
+    # Repair broken conda core early if needed (base env).
+    _check_and_repair_conda_core(
+        args=args,
+        base_prefix=base_prefix,
+        manager=manager,
+        channels=ensure_default_channels(
+            load_conda_channels(
+                base_prefix=base_prefix,
+                has_conda=which("conda"),
+                has_mamba=which("mamba"),
+                show_json_output=show_json_output,
+            )
+        ),
+    )
+
     actions = []
     ok = True
 
@@ -562,6 +693,14 @@ def run(args):
     ok_all = True
     exit_code = 0
 
+    if args.fix and not bool(getattr(args, "skip_conda_core_repair", False)):
+        _check_and_repair_conda_core(
+            args=args,
+            base_prefix=base_prefix,
+            manager=manager,
+            channels=channels,
+        )
+
     env_progress = None
     if not args.json and targets:
         env_progress = Progress(total=len(targets), label=t("progress_envs", lang=lang))
@@ -628,6 +767,7 @@ def run(args):
                         )
                     )
                 fixes.extend(_cleanup_duplicate_dist_info(env_report, args.debug))
+                fixes.extend(_cleanup_duplicate_pyd(env_report, args.debug))
                 fixes.extend(
                     _apply_same_version_case_conflicts(
                         env_report,

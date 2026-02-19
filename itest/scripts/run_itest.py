@@ -289,7 +289,10 @@ def run_env_repair_once(*, scenario_id: str, use_names: bool, subcmd=None, args=
         cmd += list(args)
     if "--json" not in cmd:
         cmd.append("--json")
-    return _run(cmd, cwd=str(REPO))
+    env = dict(os.environ)
+    # Force non-interactive approval inside env-repair for CI/itest runs.
+    env["ENV_REPAIR_AUTO_YES"] = "1"
+    return _run(cmd, cwd=str(REPO), env=env)
 
 
 def run_env_repair(*, scenario, use_names: bool):

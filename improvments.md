@@ -8,6 +8,7 @@
 - [x] **One-shot Workflow priorisiert:** `env-repair one-shot --env <env> -y` als empfohlener erster Lauf in der Doku ganz oben.
 - [x] **Lokale Builds schützen:** `verify-imports --fix` überspringt lokale/manual Installationen aus `direct_url=file://...`, wenn es kein conda-managed Äquivalent gibt (z. B. custom Wheels).
 - [x] **Python-Pin Solver-Fallback:** Bei `--force-reinstall` + Python-Pin-Konflikt wird automatisch ein Retry ohne `--force-reinstall` versucht (ermöglicht kompatible Upgrades wie `altair`).
+- [x] **Conda Core Self-Repair erweitert:** Nach kaputten `conda`-Updates erfolgt jetzt eine 2-Stufen-Reparatur (Core-Pakete, danach optional `python`/`menuinst` bei weiterhin degradiertem Health-Check oder gemischten ABI-`.pyd`-Resten).
 
 ## itest / QA
 
