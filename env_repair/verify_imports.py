@@ -31,6 +31,13 @@ CRITICAL_PACKAGES = {
 
 CRITICAL_PIP_PACKAGES = {"pip", "setuptools", "wheel"}
 
+LEGACY_UNMAINTAINED_PACKAGES = {
+    "nose": {
+        "reason": "legacy/unmaintained package",
+        "hint": "nose is unmaintained; prefer migrating test runs to pytest/unittest",
+    }
+}
+
 
 def _normalize_env_filters(env_arg):
     """
@@ -438,6 +445,38 @@ def _is_python_pin_conflict(output_text):
     return ("pin on python" in t) and ("conflicts with any installable versions" in t)
 
 
+def _legacy_unmaintained_meta(name):
+    if not name:
+        return None
+    return LEGACY_UNMAINTAINED_PACKAGES.get(normalize_name(name))
+
+
+def _collect_defaults_disabled_pip_fallback_candidates(*, conda_items, failed_pkgs):
+    failed = {normalize_name(p) for p in (failed_pkgs or []) if p}
+    out = []
+    for item in conda_items or []:
+        name = item.get("name")
+        reason = (item.get("reason") or "").lower()
+        if not name:
+            continue
+        if normalize_name(name) not in failed:
+            continue
+        if "defaults-disabled" not in reason:
+            continue
+        if _legacy_unmaintained_meta(name):
+            continue
+        out.append(
+            {
+                "dist": item.get("dist"),
+                "kind": "pip",
+                "name": name,
+                "import": item.get("import"),
+                "reason": "conda solver failed in defaults-disabled mode; trying pip fallback",
+            }
+        )
+    return out
+
+
 def _should_skip_failure(f):
     err = (f.get("error") or "").lower()
     name = (f.get("import") or "").lower()
@@ -622,6 +661,19 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                     "name": None,
                     "import": failed_import,
                     "reason": "installed from local file/path (direct_url=file://) and has no conda-managed equivalent; skip auto-reinstall",
+                }
+            )
+            continue
+
+        legacy = _legacy_unmaintained_meta(name)
+        if legacy:
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "skip",
+                    "name": None,
+                    "import": failed_import,
+                    "reason": f"{legacy['reason']}: {name}; {legacy['hint']}",
                 }
             )
             continue
@@ -981,6 +1033,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
         return conda_install(env_path, pkgs, manager, configured_channels, ignore_pinned=False, force_reinstall=True)
 
     conda_items = [p for p in plan if p["kind"] == "conda" and p["name"]]
+    conda_failed_for_pip = []
     if conda_items and manager:
         pkgs = [p["name"] for p in conda_items]
         print(f"\nReinstalling {len(pkgs)} packages via {manager} (batched)...")
@@ -988,6 +1041,10 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
         ok, installed, failed = _install_conda_batched(pkgs)
         ok_all = ok_all and ok
         actions.append({"action": "conda_reinstall_batch", "count": len(pkgs), "ok": ok, "installed": installed, "failed": failed})
+        conda_failed_for_pip = _collect_defaults_disabled_pip_fallback_candidates(
+            conda_items=conda_items,
+            failed_pkgs=failed,
+        )
 
         # If the replacement was installed successfully, remove deprecated wrappers.
         conda_rm, pip_rm = _collect_wrapper_removals(plan, conda_installed=set(installed) | initially_installed)
@@ -1032,6 +1089,15 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
         actions.append({"action": "pip_uninstall", "count": len(pip_rm), "ok": ok_rm, "packages": pip_rm})
 
     pip_items = [p for p in plan if p["kind"] in ("pip", "unknown") and p["name"]]
+    if conda_failed_for_pip:
+        existing = {normalize_name(p.get("name") or "") for p in pip_items}
+        add = [p for p in conda_failed_for_pip if normalize_name(p.get("name") or "") not in existing]
+        if add:
+            print(
+                f"\nConda fallback: trying pip for {len(add)} package(s) that failed in defaults-disabled mode..."
+            )
+            print("Pip fallback targets:", ", ".join(sorted(set(p["name"] for p in add if p.get("name")))))
+            pip_items.extend(add)
     if pip_items:
         no_deps = bool(is_conda)
         why = " (no-deps in conda env)" if no_deps else ""

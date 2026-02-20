@@ -4,8 +4,10 @@ import unittest
 from pathlib import Path
 
 from env_repair.verify_imports import (
+    _collect_defaults_disabled_pip_fallback_candidates,
     _dist_has_local_direct_url,
     _is_blacklist_skip_active,
+    _legacy_unmaintained_meta,
     _is_numba_llvmlite_version_error,
     _is_python_pin_conflict,
     _should_skip_local_unmanaged_dist,
@@ -114,6 +116,52 @@ class TestVerifyImportsParsing(unittest.TestCase):
         )
         self.assertTrue(_is_python_pin_conflict(text))
         self.assertFalse(_is_python_pin_conflict("some other solver failure"))
+
+    def test_collect_defaults_disabled_pip_fallback_candidates(self):
+        conda_items = [
+            {
+                "dist": "nose-1.3.7.dist-info",
+                "kind": "conda",
+                "name": "nose",
+                "import": "nose",
+                "reason": "defaults-disabled: attempting reinstall from configured channels",
+            },
+            {
+                "dist": "numpy-2.3.0.dist-info",
+                "kind": "conda",
+                "name": "numpy",
+                "import": "numpy",
+                "reason": None,
+            },
+        ]
+        out = _collect_defaults_disabled_pip_fallback_candidates(
+            conda_items=conda_items,
+            failed_pkgs=["nose", "numpy"],
+        )
+        self.assertEqual(len(out), 0)
+
+    def test_legacy_unmaintained_meta(self):
+        meta = _legacy_unmaintained_meta("nose")
+        self.assertIsNotNone(meta)
+        self.assertIn("unmaintained", meta.get("reason", ""))
+        self.assertIsNone(_legacy_unmaintained_meta("numpy"))
+
+    def test_collect_defaults_disabled_pip_fallback_candidates_non_legacy(self):
+        conda_items = [
+            {
+                "dist": "foo-1.0.0.dist-info",
+                "kind": "conda",
+                "name": "foo",
+                "import": "foo",
+                "reason": "defaults-disabled: attempting reinstall from configured channels",
+            }
+        ]
+        out = _collect_defaults_disabled_pip_fallback_candidates(
+            conda_items=conda_items,
+            failed_pkgs=["foo"],
+        )
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["name"], "foo")
 
 
 if __name__ == "__main__":
