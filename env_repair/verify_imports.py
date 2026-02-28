@@ -3,6 +3,7 @@ import contextlib
 import os
 import json
 import subprocess
+import shutil
 import signal
 import sys
 from urllib.parse import urlparse
@@ -232,11 +233,88 @@ def _should_skip_local_unmanaged_dist(dist_info, *, kind):
     return kind == "unknown" and _dist_has_local_direct_url(dist_info)
 
 
+def _is_import_timeout_error(error):
+    if not error:
+        return False
+    e = str(error).lower()
+    return "import timed out" in e
+
+
+def _search_json_has_package(search_json, package_name):
+    """
+    Best-effort detection whether `package_name` exists in a conda/mamba search --json payload.
+    Supports both solver payload styles used by conda/mamba.
+    """
+    if not isinstance(search_json, dict) or not package_name:
+        return False
+    target = normalize_name(package_name)
+
+    # conda/mamba often use {"pkgname": [builds...]}
+    for key in search_json.keys():
+        if normalize_name(key) == target:
+            return True
+
+    # Some payloads use {"result": {"pkgs": [{"name": "..."}]}}
+    result = search_json.get("result")
+    if isinstance(result, dict):
+        pkgs = result.get("pkgs")
+        if isinstance(pkgs, list):
+            for pkg in pkgs:
+                if isinstance(pkg, dict) and normalize_name(pkg.get("name") or "") == target:
+                    return True
+    return False
+
+
+def _conda_search_has_package(manager, package_name, *, debug):
+    if manager not in ("conda", "mamba") or not package_name:
+        return False
+    try:
+        data = run_json_cmd([manager, "search", package_name, "--json"], show_json_output=debug)
+    except Exception:
+        return False
+    return _search_json_has_package(data, package_name)
+
+
+def _pick_conda_candidate_for_local_direct_url(*, manager, dist_name, failed_import, debug):
+    """
+    For local file/path installs (`direct_url=file://`), probe conda search before skipping.
+    Returns a candidate conda package name or None.
+    """
+    candidates = []
+    if dist_name:
+        candidates.append(dist_name)
+    if failed_import:
+        candidates.append(failed_import)
+        candidates.append(failed_import.replace("_", "-"))
+        candidates.append(failed_import.replace(".", "-"))
+
+    seen = set()
+    deduped = []
+    for cand in candidates:
+        n = normalize_name(cand or "")
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        deduped.append(cand)
+
+    for cand in deduped:
+        if _conda_search_has_package(manager, cand, debug=debug):
+            return cand
+    return None
+
+
 def _is_numba_llvmlite_version_error(error):
     if not error:
         return False
     e = str(error).lower()
     return "numba requires at least version" in e and "of llvmlite" in e
+
+
+def _is_numba_numpy_upper_bound_error(error):
+    if not error:
+        return False
+    e = str(error).lower()
+    return "numba needs numpy" in e and ("or less" in e or "<" in e)
 
 
 def _is_blacklist_skip_active(*, kind, name, blocked_names, initially_installed):
@@ -406,6 +484,126 @@ def _extract_missing_module_name(error):
     return mod.split(".", 1)[0]
 
 
+def _missing_module_conda_fallback(mod_norm):
+    """
+    Map well-known missing private modules to their conda package provider.
+    """
+    if not mod_norm:
+        return None
+    mapping = {
+        normalize_name("_brotli"): "brotli-python",
+        normalize_name("_argon2_cffi_bindings"): "argon2-cffi-bindings",
+    }
+    return mapping.get(normalize_name(mod_norm))
+
+
+def _is_protobuf_generatedfile_mismatch_error(err):
+    if not err:
+        return False
+    e = str(err)
+    return (
+        "_CheckCalledFromGeneratedFile" in e
+        and ("google\\protobuf\\descriptor.py" in e or "google/protobuf/descriptor.py" in e)
+    )
+
+
+def _is_dll_procedure_not_found_error(err):
+    if not err:
+        return False
+    e = str(err).lower()
+    return ("die angegebene prozedur wurde nicht gefunden" in e) or ("specified procedure could not be found" in e)
+
+
+def _preclean_module_roots_for_conda_package(conda_name):
+    mapping = {
+        "pyarrow": ["pyarrow"],
+        "scikit-learn": ["sklearn"],
+        "imbalanced-learn": ["imblearn"],
+        "pygithub": ["github"],
+        "pynacl": ["nacl"],
+        "streamlit": ["streamlit"],
+    }
+    return mapping.get(normalize_name(conda_name), [])
+
+
+def _stubborn_import_pip_target(import_name):
+    mapping = {
+        "pyarrow": "pyarrow",
+        "github": "pygithub",
+        "streamlit": "streamlit",
+    }
+    return mapping.get(normalize_name(import_name or ""))
+
+
+def _requires_hard_remove_before_reinstall(conda_name):
+    # Some packages can stay broken even after force-reinstall when file ownership
+    # is mixed. Hard-remove first, then reinstall.
+    return normalize_name(conda_name or "") in {"pygithub"}
+
+
+def _is_nacl_sodium_dll_error(err):
+    if not err:
+        return False
+    e = str(err).lower()
+    return ("_sodium" in e) and ("dll load failed" in e) and ("nacl" in e or "sodium" in e)
+
+
+def _preclean_stubborn_conda_artifacts(*, python_exe, conda_packages):
+    from .discovery import get_site_packages
+
+    roots_by_pkg = {
+        normalize_name(pkg): _preclean_module_roots_for_conda_package(pkg)
+        for pkg in (conda_packages or [])
+    }
+    roots = sorted({r for vals in roots_by_pkg.values() for r in vals})
+    if not roots:
+        return {"ok": True, "removed": 0}
+
+    removed = 0
+    ok = True
+    for sp in get_site_packages(python_exe) or []:
+        sp_path = Path(sp)
+        if not sp_path.exists():
+            continue
+        for root in roots:
+            p_dir = sp_path / root
+            p_file = sp_path / f"{root}.py"
+            if p_dir.exists() and p_dir.is_dir():
+                try:
+                    shutil.rmtree(p_dir, ignore_errors=True)
+                    removed += 1
+                except Exception:
+                    ok = False
+            if p_file.exists() and p_file.is_file():
+                try:
+                    p_file.unlink()
+                    removed += 1
+                except Exception:
+                    ok = False
+
+            # Remove matching dist-info / egg-info stubs for the same root.
+            for di in sp_path.glob("*.dist-info"):
+                base = normalize_name(di.name.split("-", 1)[0])
+                if base in (normalize_name(root), normalize_name(root.replace("_", "-"))):
+                    try:
+                        shutil.rmtree(di, ignore_errors=True)
+                        removed += 1
+                    except Exception:
+                        ok = False
+            for ei in sp_path.glob("*.egg-info"):
+                base = normalize_name(ei.name.split("-", 1)[0])
+                if base in (normalize_name(root), normalize_name(root.replace("_", "-"))):
+                    try:
+                        if ei.is_dir():
+                            shutil.rmtree(ei, ignore_errors=True)
+                        else:
+                            ei.unlink()
+                        removed += 1
+                    except Exception:
+                        ok = False
+    return {"ok": ok, "removed": removed}
+
+
 def _python_major_minor(python_exe):
     try:
         proc = subprocess.run(
@@ -434,6 +632,10 @@ def _extract_solver_offenders(output_text):
     offenders = set()
     # Lines like: "└─ tables =* * does not exist"
     for m in re.finditer(r"(?:^|\n)\s*[├└]─\s*([A-Za-z0-9_.-]+)\s", output_text):
+        offenders.add(m.group(1))
+    for m in re.finditer(r"(?:^|\n)[^\n]*\b([A-Za-z0-9_.-]+)\s*=\*\s*\*\s*does not exist", output_text):
+        offenders.add(m.group(1))
+    for m in re.finditer(r"(?:^|\n)[^\n]*\b([A-Za-z0-9_.-]+)\s*==?[^\n]*does not exist", output_text):
         offenders.add(m.group(1))
     return offenders
 
@@ -584,6 +786,10 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
         conda_targets = []
         pip_targets = []
         for mod_norm in sorted(missing.keys()):
+            fallback_conda = _missing_module_conda_fallback(mod_norm)
+            if fallback_conda and manager:
+                conda_targets.append(fallback_conda)
+                continue
             entry = conda_entries_by_name.get(mod_norm) or {}
             if entry:
                 conda_name = entry.get("name") or mod_norm
@@ -654,15 +860,32 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
             continue
         kind, name = _classify_dist(dist_info, conda_entries_by_name=conda_entries_by_name)
         if _dist_has_local_direct_url(dist_info) and normalize_name(name or "") not in conda_entries_by_name:
-            plan.append(
-                {
-                    "dist": dist_info.name,
-                    "kind": "skip",
-                    "name": None,
-                    "import": failed_import,
-                    "reason": "installed from local file/path (direct_url=file://) and has no conda-managed equivalent; skip auto-reinstall",
-                }
+            candidate = _pick_conda_candidate_for_local_direct_url(
+                manager=manager,
+                dist_name=name,
+                failed_import=failed_import,
+                debug=debug,
             )
+            if candidate and manager:
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": candidate,
+                        "import": failed_import,
+                        "reason": "installed from local file/path (direct_url=file://); conda candidate found via search, forcing relink",
+                    }
+                )
+            else:
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "skip",
+                        "name": None,
+                        "import": failed_import,
+                        "reason": "installed from local file/path (direct_url=file://) and no conda candidate found via search; skip auto-reinstall",
+                    }
+                )
             continue
 
         legacy = _legacy_unmaintained_meta(name)
@@ -777,6 +1000,185 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
             )
             continue
 
+        # Numba may also fail when numpy is too new for this numba build.
+        if kind == "conda" and name and normalize_name(name) == "numba" and _is_numba_numpy_upper_bound_error(f.get("error")):
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "numpy<2.4",
+                    "import": failed_import,
+                    "reason": "numba requires numpy<2.4 for this build",
+                }
+            )
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "numba",
+                    "import": failed_import,
+                    "reason": "relink numba after numpy downgrade",
+                }
+            )
+            continue
+
+        # imbalanced-learn often fails as a follow-up when sklearn/scipy/numpy stack is inconsistent.
+        if kind == "conda" and name and normalize_name(name) == "imbalanced-learn":
+            err_lower = (f.get("error") or "").lower()
+            if "from sklearn.base import clone" in err_lower:
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "numpy",
+                        "import": failed_import,
+                        "reason": "imblearn depends on sklearn stack; relink numpy",
+                    }
+                )
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "scipy",
+                        "import": failed_import,
+                        "reason": "imblearn depends on sklearn stack; relink scipy",
+                    }
+                )
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "scikit-learn",
+                        "import": failed_import,
+                        "reason": "imblearn depends on sklearn stack; relink scikit-learn",
+                    }
+                )
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "imbalanced-learn",
+                        "import": failed_import,
+                        "reason": "relink imbalanced-learn after sklearn stack relink",
+                    }
+                )
+                continue
+
+        # sklearn import traces often indicate underlying scipy/numpy ABI drift.
+        if kind == "conda" and name and normalize_name(name) == "scikit-learn":
+            err_lower = (f.get("error") or "").lower()
+            if "sklearn.utils" in err_lower or "from sklearn.base import clone" in err_lower:
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "numpy",
+                        "import": failed_import,
+                        "reason": "sklearn stack repair; relink numpy",
+                    }
+                )
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "scipy",
+                        "import": failed_import,
+                        "reason": "sklearn stack repair; relink scipy",
+                    }
+                )
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "scikit-learn",
+                        "import": failed_import,
+                        "reason": "sklearn stack repair; relink scikit-learn",
+                    }
+                )
+                continue
+
+        # pyarrow DLL/procedure issues are frequently due to mixed arrow runtime artifacts.
+        if kind == "conda" and name and normalize_name(name) == "pyarrow":
+            if _is_dll_procedure_not_found_error(f.get("error")):
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "libarrow",
+                        "import": failed_import,
+                        "reason": "pyarrow DLL mismatch; relink libarrow runtime",
+                    }
+                )
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "pyarrow",
+                        "import": failed_import,
+                        "reason": "pyarrow DLL mismatch; relink pyarrow",
+                    }
+                )
+                continue
+
+        # pygithub imports can fail when its dependency chain drifted.
+        if kind == "conda" and name and normalize_name(name) == "pygithub":
+            if _is_nacl_sodium_dll_error(f.get("error")):
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "libsodium",
+                        "import": failed_import,
+                        "reason": "pygithub->pynacl _sodium DLL mismatch; relink libsodium",
+                    }
+                )
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "requests",
+                    "import": failed_import,
+                    "reason": "pygithub dependency chain relink (requests)",
+                }
+            )
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "pynacl",
+                    "import": failed_import,
+                    "reason": "pygithub dependency chain relink (pynacl)",
+                }
+            )
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "pyjwt",
+                    "import": failed_import,
+                    "reason": "pygithub dependency chain relink (pyjwt)",
+                }
+            )
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "cryptography",
+                    "import": failed_import,
+                    "reason": "pygithub dependency chain relink (cryptography)",
+                }
+            )
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "pygithub",
+                    "import": failed_import,
+                    "reason": "pygithub dependency chain relink (pygithub)",
+                }
+            )
+            continue
+
         # attrdict is archived/inactive and breaks on modern Python because collections.Mapping was removed.
         # Replace it with attrdict3 (drop-in fork) when we see this signature.
         if name and normalize_name(name) == "attrdict" and _is_removed_collections_mapping_error(f.get("error")):
@@ -788,6 +1190,24 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                     "import": failed_import,
                     "reason": "deprecated/broken: replace attrdict with attrdict3 (collections.Mapping removed)",
                     "uninstall": {"kind": "conda" if kind == "conda" else "pip", "name": "attrdict"},
+                }
+            )
+            continue
+
+        # pkg_resources is legacy; if setuptools relink did not restore it, avoid pip loop noise.
+        if (
+            kind == "conda"
+            and name
+            and normalize_name(name) == "setuptools"
+            and normalize_name(missing_mod or "") == normalize_name("pkg_resources")
+        ):
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "skip",
+                    "name": None,
+                    "import": failed_import,
+                    "reason": "legacy pkg_resources missing; skip auto-repair to avoid pip/conda thrash",
                 }
             )
             continue
@@ -846,6 +1266,34 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                     "name": None,
                     "import": failed_import,
                     "reason": "unfixable: boto (boto2) fails (vendored six.moves); migrate to boto3 or pin older Python",
+                }
+            )
+            continue
+
+        # Streamlit protobuf codegen/runtime mismatch:
+        # force-reinstall protobuf first, then relink streamlit.
+        if (
+            kind == "conda"
+            and name
+            and normalize_name(name) == "streamlit"
+            and _is_protobuf_generatedfile_mismatch_error(f.get("error"))
+        ):
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "protobuf>=4,<7",
+                    "import": failed_import,
+                    "reason": "streamlit protobuf mismatch; align protobuf runtime with newer streamlit",
+                }
+            )
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "conda",
+                    "name": "streamlit>=1.30",
+                    "import": failed_import,
+                    "reason": "upgrade/relink streamlit to protobuf-compatible build",
                 }
             )
             continue
@@ -1036,6 +1484,28 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
     conda_failed_for_pip = []
     if conda_items and manager:
         pkgs = [p["name"] for p in conda_items]
+        stubborn = []
+        for p in pkgs:
+            if _preclean_module_roots_for_conda_package(p):
+                stubborn.append(p)
+        if stubborn:
+            print(f"\nPre-cleaning stale artifacts for {len(sorted(set(stubborn)))} stubborn package(s)...")
+            print("Pre-clean targets:", ", ".join(sorted(set(stubborn))))
+            pre = _preclean_stubborn_conda_artifacts(python_exe=python_exe, conda_packages=stubborn)
+            actions.append({"action": "preclean_stubborn_artifacts", "ok": bool(pre.get("ok")), "removed": pre.get("removed", 0), "packages": sorted(set(stubborn))})
+
+        hard_remove = sorted({p for p in pkgs if _requires_hard_remove_before_reinstall(p)})
+        if hard_remove:
+            refreshed = get_env_package_entries(env_path, manager, show_json_output=debug) if is_conda else []
+            present = {normalize_name((e or {}).get("name") or "") for e in refreshed if isinstance(e, dict)}
+            to_remove = [p for p in hard_remove if normalize_name(p) in present]
+            if to_remove:
+                print(f"\nHard-remove before reinstall for {len(to_remove)} package(s)...")
+                print("Conda hard-remove targets:", ", ".join(to_remove))
+                ok_rm_hard = conda_remove(env_path, to_remove, manager)
+                actions.append({"action": "conda_hard_remove_before_reinstall", "ok": ok_rm_hard, "packages": to_remove})
+                ok_all = ok_all and ok_rm_hard
+
         print(f"\nReinstalling {len(pkgs)} packages via {manager} (batched)...")
         print("Conda targets:", ", ".join(sorted(set(pkgs))))
         ok, installed, failed = _install_conda_batched(pkgs)
@@ -1356,20 +1826,26 @@ def verify_imports(args):
         print("\nInterrupted verify-imports; waiting for running checks to stop...", file=sys.stderr)
         raise
 
-    failures = [r for r in results if not r["ok"]]
+    timeout_results = [r for r in results if (not r["ok"]) and _is_import_timeout_error(r.get("error"))]
+    failures = [r for r in results if (not r["ok"]) and not _is_import_timeout_error(r.get("error"))]
 
     if not args.json:
         print("\nImport Verification Report:")
         print(f"Checked {len(to_check)} imports in {env_path}\n")
-        if not failures:
+        if not failures and not timeout_results:
             print("All checked imports succeeded!")
         else:
-            print(f"Found {len(failures)} broken imports:\n")
-            for f in failures:
-                print(f"  ❌ {f['import']} (from {f['dist']})")
-                if f.get("error"):
-                    for line in f["error"].splitlines()[:8]:
-                        print(f"      {line}")
+            if failures:
+                print(f"Found {len(failures)} broken imports:\n")
+                for f in failures:
+                    print(f"  [FAIL] {f['import']} (from {f['dist']})")
+                    if f.get("error"):
+                        for line in f["error"].splitlines()[:8]:
+                            print(f"      {line}")
+            if timeout_results:
+                print(f"\nIgnored {len(timeout_results)} import timeout(s) (not treated as failures):")
+                for t in timeout_results[:12]:
+                    print(f"  [TIMEOUT] {t['import']} (from {t['dist']})")
 
     fix_report = None
     if getattr(args, "fix", False) and failures:
@@ -1406,7 +1882,54 @@ def verify_imports(args):
                 for pf in post_failures[:12]:
                     dist = pf.get("dist") or "?"
                     imp = pf.get("import") or "?"
-                    print(f"  ❌ {imp} (from {dist})")
+                    print(f"  [FAIL] {imp} (from {dist})")
+                # Last-chance fallback for stubborn imports in mixed envs:
+                # try pip wheel reinstall for known problematic packages.
+                fallback_targets = sorted(
+                    {
+                        _stubborn_import_pip_target(pf.get("import"))
+                        for pf in post_failures
+                        if _stubborn_import_pip_target(pf.get("import"))
+                    }
+                )
+                if fallback_targets:
+                    print("\nFallback: repairing stubborn imports via pip wheel reinstall...")
+                    print("Pip fallback targets:", ", ".join(fallback_targets))
+                    fallback_actions = []
+                    for pkg in fallback_targets:
+                        ok_fb = pip_reinstall(
+                            python_exe,
+                            pkg,
+                            # Keep fallback narrow: only relink the target wheel itself.
+                            # Pulling full dependency trees in a mixed conda base often causes
+                            # clobber/permission conflicts (e.g. charset_normalizer *.pyd).
+                            no_deps=True,
+                            only_binary=(os.name == "nt"),
+                            ignore_installed=True,
+                        )
+                        fallback_actions.append({"action": "pip_fallback_reinstall", "package": pkg, "ok": ok_fb})
+                    if isinstance(fix_report, dict):
+                        fix_report.setdefault("actions", []).extend(fallback_actions)
+
+                    # Re-check only currently failing imports.
+                    still = []
+                    for pf in post_failures:
+                        imp = pf.get("import")
+                        if not imp or not isinstance(imp, str) or not imp.isidentifier():
+                            still.append(pf)
+                            continue
+                        ok_imp, err_imp = check_import(imp, python_exe)
+                        if not ok_imp:
+                            still.append({"dist": pf.get("dist"), "import": imp, "error": err_imp})
+                    post_failures = still
+                    if post_failures:
+                        print(f"\nPost-fallback: {len(post_failures)} import(s) still failing.")
+                        for pf in post_failures[:12]:
+                            dist = pf.get("dist") or "?"
+                            imp = pf.get("import") or "?"
+                            print(f"  [FAIL] {imp} (from {dist})")
+                    else:
+                        print("\nPost-fallback: all remaining imports OK.")
             else:
                 print("\nPost-fix: all non-skipped imports OK.")
     else:
@@ -1427,6 +1950,14 @@ def verify_imports(args):
                 "error": f.get("error"),
             }
             for f in failures
+        ],
+        "timeouts": [
+            {
+                "dist": t.get("dist"),
+                "import": t.get("import"),
+                "error": t.get("error"),
+            }
+            for t in timeout_results
         ],
         "post_failures": post_failures,
         "fix": fix_report,

@@ -69,8 +69,6 @@ def _debug(enabled, event, payload):
     print("[debug]", f"{event}:", payload)
 
 
-
-
 def scan_env(env_path):
     env = {"path": env_path, "python": None, "issues": []}
     python_exe = get_python_exe(env_path)
@@ -708,6 +706,8 @@ def run(args):
     for env_idx, env_path in enumerate(targets, start=1):
         if env_progress:
             env_progress.update(env_idx)
+            # Ensure progress line is terminated before printing scan header.
+            env_progress.finish()
         if not args.json:
             print(t("step_scan", lang=lang) + ": " + env_path)
         env_report = scan_env(env_path)

@@ -27,3 +27,4 @@ class Progress:
         if self.last_len:
             self.stream.write("\n")
             self.stream.flush()
+            self.last_len = 0

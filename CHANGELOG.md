@@ -1,6 +1,10 @@
 # Changelog (env-repair)
 
 ## Unreleased
+- Verify-imports: import timeouts are now reported separately (`[TIMEOUT]`) and no longer treated as hard failures for fix planning/retry loops.
+- Verify-imports: local `direct_url=file://...` distributions are no longer auto-skipped by default; env-repair now probes `mamba/conda search --json` and force-reinstalls via conda when a managed candidate exists.
+- Verify-imports: report JSON now includes a dedicated `timeouts` field.
+- Scan UX: fixed progress/header formatting so `Scan:` starts on a new line after `Envs ... ETA ...`.
 - Initial project extraction and baseline docs.
 - Docs: prefer `mamba` in command examples (keep `conda` as fallback where needed).
 - Core env scan and repair workflow.

@@ -219,7 +219,8 @@ Notes:
 - If the solver fails for a specific package, EnvRepair retries the batch without the offending spec and remembers it in:
   - `.env_repair\verify_imports_blacklist.json`
 - Platform-only modules are skipped (e.g. `sh` on Windows, `ptyprocess` missing `fcntl` on Windows).
-- Local/manual installs from `direct_url=file://...` without a conda-managed equivalent are skipped in auto-repair.
+- Import timeouts are reported separately (`[TIMEOUT]`) and are not treated as hard failures in fix planning.
+- For local/manual installs from `direct_url=file://...`, EnvRepair now probes conda/mamba search first; only packages without a conda candidate are skipped.
 
 ---
 
@@ -271,10 +272,31 @@ python tools\sync_versions.py --pypi-sdist --staged-recipes staged-recipes
 
 | Signal in output | Meaning | Recommended next step |
 |---|---|---|
-| `skip [installed from local file/path (direct_url=file://...)]` | Package was installed from a local/custom artifact (manual wheel/build). | Keep as-is or reinstall manually from your local source if needed. |
+| `skip [installed from local file/path (direct_url=file://...)]` | Package was installed from a local/custom artifact and no conda candidate was found via search. | Keep as-is or reinstall manually from your local source if needed. |
+| `[TIMEOUT] ...` | Import check exceeded the timeout window for this run. | Re-run verify-imports; timeout entries are informational and not auto-repair targets. |
 | `skip [blacklisted for python X.Y ...]` | Previous solver run marked this package as incompatible for this Python version/channel set. | Re-run after channel/version changes, or remove the entry from `.env_repair\verify_imports_blacklist.json` to retry once. |
 | `Solver hit pinned-python conflict; retrying without --force-reinstall...` | `--force-reinstall` could not satisfy pinned Python constraints. | Usually safe to continue; env-repair already retries with upgrade-friendly solver behavior. |
 | `Post-fix: all non-skipped imports OK.` | Automatic repair succeeded for everything that is auto-fixable. | Review skipped imports; handle only those manually if they matter for your workload. |
+
+### verify-imports auto-repair hints
+
+- Missing private runtime modules are now mapped to the correct conda providers before regular fix planning:
+  - `_brotli` -> `brotli-python`
+  - `_argon2_cffi_bindings` -> `argon2-cffi-bindings`
+  - `pkg_resources` -> `setuptools`
+- For Streamlit protobuf runtime/codegen mismatch (`_CheckCalledFromGeneratedFile`), EnvRepair now schedules:
+  - `protobuf>=4,<7` alignment
+  - `streamlit>=1.30` upgrade/relink
+- If `imblearn` fails with `from sklearn.base import clone`, EnvRepair relinks the sklearn stack (`numpy`, `scipy`, `scikit-learn`) before relinking `imbalanced-learn`.
+- If `sklearn` still fails in the same chain, EnvRepair also relinks `numpy` + `scipy` + `scikit-learn`.
+- If `pyarrow` reports DLL/procedure mismatch, EnvRepair relinks `libarrow` + `pyarrow`.
+- If `pygithub` fails in its import chain, EnvRepair relinks `requests` + `pynacl` + `pygithub`.
+- `pkg_resources` is treated as legacy and skipped to avoid pip/conda thrash loops.
+- For stubborn compiled/import-chain packages (`pyarrow`, `scikit-learn`, `imbalanced-learn`, `pygithub`, `streamlit`), EnvRepair now performs a targeted pre-clean of stale site-packages artifacts before conda relink.
+- If `pyarrow`, `github`, or `streamlit` still fail after conda repair, EnvRepair runs a last-chance pip wheel reinstall for exactly those imports and rechecks immediately.
+- For `pygithub`, EnvRepair now performs a hard conda remove before reinstall when needed, to recover from partial module-tree loss (`No module named 'github'`).
+- For `pygithub` failures involving `nacl._sodium` DLL load issues, EnvRepair additionally relinks `libsodium` + `pynacl` in the same repair batch.
+- Solver offender parsing accepts more libmamba output variants (`name =* * does not exist` and `name ==x ... does not exist`) to avoid false negatives in blacklist/retry logic.
 
 ---
 
