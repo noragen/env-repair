@@ -724,7 +724,7 @@ def run(args):
         if conda_here:
             entries = get_env_package_entries(env_path, manager, show_json_output=show_json_output)
         else:
-            entries = pip_list_json(python_exe) if python_exe else []
+            entries = pip_list_json(python_exe, use_uv=getattr(args, "use_uv", False)) if python_exe else []
         env_report["initial_entries"] = entries
 
         snapshot = None
@@ -746,7 +746,7 @@ def run(args):
             elif python_exe:
                 if not args.json:
                     print(t("step_snapshot", lang=lang) + ": " + env_path)
-                snap_ok = pip_freeze(python_exe, snapshot)
+                snap_ok = pip_freeze(python_exe, snapshot, use_uv=getattr(args, "use_uv", False))
                 env_report["snapshot"] = {"path": str(snapshot), "ok": snap_ok, "type": "pip-freeze"}
             else:
                 env_report["snapshot"] = {"path": str(snapshot), "ok": False, "reason": "no-python"}
@@ -777,6 +777,7 @@ def run(args):
                         args.ignore_pinned,
                         args.force_reinstall,
                         args.debug,
+                        use_uv=getattr(args, "use_uv", False),
                     )
                     )
                 fixes.extend(
@@ -791,6 +792,7 @@ def run(args):
                         pip_fallback,
                         args.debug,
                         in_conda_env=bool(conda_here),
+                        use_uv=getattr(args, "use_uv", False),
                     )
                 )
 
@@ -809,6 +811,7 @@ def run(args):
                             args.debug,
                             show_json_output=show_json_output,
                             lang=lang,
+                            use_uv=getattr(args, "use_uv", False),
                         )
                     )
             except OperationInterrupted as e:
@@ -855,7 +858,7 @@ def run(args):
                         if conda_here and manager and snap.get("type") == "conda-yaml":
                             restored = env_update_from_yaml(env_path, manager, snap_path)
                         elif python_exe and snap.get("type") == "pip-freeze":
-                            restored = pip_install_requirements(python_exe, snap_path)
+                            restored = pip_install_requirements(python_exe, snap_path, use_uv=getattr(args, "use_uv", False))
                     fixes.append({"fixed": restored, "method": "restore", "package": "<snapshot>"})
                     if not restored:
                         exit_code = max(exit_code, 1)

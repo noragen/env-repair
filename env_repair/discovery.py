@@ -17,6 +17,7 @@ def detect_managers():
     return {
         "conda": which_path("conda"),
         "mamba": which_path("mamba"),
+        "uv": which_path("uv"),
         "micromamba": which_path("micromamba"),
     }
 

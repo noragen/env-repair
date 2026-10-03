@@ -3,10 +3,26 @@ import subprocess
 from pathlib import Path
 
 from .subprocess_utils import run_cmd_live
+from .discovery import which_path
+
+def _get_pip_cmd(python_exe, use_uv, base_args):
+    uv_path = which_path("uv") if use_uv else None
+    if uv_path and "--ignore-installed" not in base_args:
+        mapped = []
+        for arg in base_args:
+            if arg == "--force-reinstall":
+                mapped.append("--reinstall")
+            elif arg == "-y" and base_args and base_args[0] == "uninstall":
+                # uv pip uninstall doesn't expect -y
+                pass
+            else:
+                mapped.append(arg)
+        return [uv_path, "pip"] + mapped + ["--python", python_exe]
+    return [python_exe, "-m", "pip"] + base_args
 
 
-def pip_list_json(python_exe):
-    cmd = [python_exe, "-m", "pip", "list", "--format=json"]
+def pip_list_json(python_exe, *, use_uv=False):
+    cmd = _get_pip_cmd(python_exe, use_uv, ["list", "--format=json"])
     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if res.returncode != 0:
         return []
@@ -27,10 +43,11 @@ def pip_list_json(python_exe):
     return out
 
 
-def pip_freeze(python_exe, out_path):
+def pip_freeze(python_exe, out_path, *, use_uv=False):
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    res = subprocess.run([python_exe, "-m", "pip", "freeze"], capture_output=True, text=True, check=False)
+    cmd = _get_pip_cmd(python_exe, use_uv, ["freeze"])
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if res.returncode != 0:
         return False
     try:
@@ -40,31 +57,32 @@ def pip_freeze(python_exe, out_path):
         return False
 
 
-def pip_install_requirements(python_exe, req_path):
-    cmd = [python_exe, "-m", "pip", "install", "-r", str(req_path)]
+def pip_install_requirements(python_exe, req_path, *, use_uv=False):
+    cmd = _get_pip_cmd(python_exe, use_uv, ["install", "-r", str(req_path)])
     return run_cmd_live(cmd) == 0
 
 
-def pip_reinstall(python_exe, package, *, no_deps=False, only_binary=False, ignore_installed=False):
+def pip_reinstall(python_exe, package, *, no_deps=False, only_binary=False, ignore_installed=False, use_uv=False):
     no_deps_args = ["--no-deps"] if no_deps else []
     only_bin_args = ["--only-binary=:all:"] if only_binary else []
     ignore_args = ["--ignore-installed"] if ignore_installed else []
-    cmd = (
-        [python_exe, "-m", "pip", "install", "--upgrade", "--force-reinstall"]
+    base_args = (
+        ["install", "--upgrade", "--force-reinstall"]
         + no_deps_args
         + only_bin_args
         + ignore_args
         + [package]
     )
+    cmd = _get_pip_cmd(python_exe, use_uv, base_args)
     return run_cmd_live(cmd) == 0
 
 
-def pip_get_version(python_exe, package):
+def pip_get_version(python_exe, package, *, use_uv=False):
     """
-    Best-effort query of the installed version via `pip show`.
+    Best-effort query of the installed version via pip show.
     Returns version string or None.
     """
-    cmd = [python_exe, "-m", "pip", "show", package]
+    cmd = _get_pip_cmd(python_exe, use_uv, ["show", package])
     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if res.returncode != 0 or not res.stdout:
         return None
@@ -75,8 +93,8 @@ def pip_get_version(python_exe, package):
     return None
 
 
-def pip_uninstall(python_exe, packages):
+def pip_uninstall(python_exe, packages, *, use_uv=False):
     if not packages:
         return True
-    cmd = [python_exe, "-m", "pip", "uninstall", "-y"] + list(packages)
+    cmd = _get_pip_cmd(python_exe, use_uv, ["uninstall", "-y"] + list(packages))
     return run_cmd_live(cmd) == 0

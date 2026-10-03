@@ -73,6 +73,7 @@ def one_shot(args):
         env=[env_target],
         fix=True,
         skip_conda_core_repair=True,
+        use_uv=bool(getattr(args, "use_uv", False)),
         adopt_pip=bool(getattr(args, "adopt_pip", False)),
         keep_pip=bool(getattr(args, "keep_pip", False)),
         prefer=getattr(args, "prefer", "auto"),
@@ -94,6 +95,7 @@ def one_shot(args):
     verify_args = argparse.Namespace(
         env=[],
         env_single=env_target,
+        use_uv=bool(getattr(args, "use_uv", False)),
         full=not bool(getattr(args, "critical_only", False)),
         json=bool(getattr(args, "json", False)),
         debug=bool(getattr(args, "debug", False)),
@@ -208,6 +210,7 @@ def build_parser():
     osr.add_argument("--level", choices=["safe", "normal", "rebuild"], default="safe", help=t("help_level_inconsistent", lang=lang))
     osr.add_argument("--plan", action="store_true", help=t("help_plan", lang=lang))
     osr.add_argument("-y", "--yes", action="store_true", help=t("help_yes", lang=lang))
+    osr.add_argument("--use-uv", action="store_true", default=argparse.SUPPRESS, help="Use uv for pip operations if available")
     osr.add_argument("--adopt-pip", action="store_true", help=t("help_adopt_pip", lang=lang))
     osr.add_argument("--keep-pip", action="store_true", help=t("help_keep_pip", lang=lang))
     osr.add_argument("--prefer", choices=["auto", "conda", "pip"], default="auto", help=t("help_prefer", lang=lang))
@@ -270,6 +273,7 @@ def build_parser():
     # provided top-level value when the subcommand is selected.
     vi.add_argument("--env", dest="env_single", help=t("help_env_single", lang=lang))
     vi.add_argument("--full", action="store_true", help="Check all packages (default: critical only)")
+    vi.add_argument("--use-uv", action="store_true", default=argparse.SUPPRESS, help="Use uv for pip operations if available")
     vi.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     vi.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
     vi.add_argument("--fix", action="store_true", help="Attempt to automatically fix broken imports")
@@ -281,6 +285,7 @@ def build_parser():
         help=t("help_env_multi", lang=lang),
     )
     p.add_argument("--fix", action="store_true", help=t("help_fix", lang=lang))
+    p.add_argument("--use-uv", action="store_true", help="Use uv for pip operations if available")
     p.add_argument("--adopt-pip", action="store_true", help=t("help_adopt_pip", lang=lang))
     p.add_argument(
         "--keep-pip",

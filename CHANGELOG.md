@@ -1,6 +1,18 @@
 # Changelog (env-repair)
 
 ## Unreleased
+
+## 0.2.7 (release preparation)
+- Completed optional `--use-uv` support for scan/fix, one-shot, import repairs, adoption and snapshot restoration; retain pip fallback when uv is missing or `--ignore-installed` is needed.
+- CLI: preserve `--use-uv` when supplied before or after the `one-shot` and `verify-imports` subcommands, and target the selected environment's Python interpreter.
+- Verify-imports: remove legacy `nose` installations when imports fail because the removed `imp` module is required, rather than repeatedly reinstalling the broken package.
+- Verify-imports: attempt to restore missing `pkg_resources` by installing setuptools via pip when the target Python is available; retain a conda fallback when no Python executable is available.
+- Conda-forge: migrate the recipe template to the v1 format with an embedded build command, declared console entry point, Python 3.9/current-Python import tests, `pip check`, and a CLI smoke test.
+- Conda-forge: use the build-provided Python executable explicitly (`%PYTHON%` on Windows, `${PYTHON}` on Unix); replace the staged recipe's custom build scripts and Windows batch launcher with generated entry points.
+- Release tooling: synchronize v1 context variables and copy the conda-forge template as `staged-recipes/recipes/env-repair/recipe.yaml`; update regression tests and packaging documentation.
+- Validation: 89 unit tests passed. The Windows package build and CLI smoke test passed; Python 3.9/3.14 imports passed. The local Python 3.14 `pip check` needs user-site isolation (`python -s -m pip check`) because unrelated user-installed packages contaminate the test environment.
+
+## Earlier development history
 - Verify-imports: import timeouts are now reported separately (`[TIMEOUT]`) and no longer treated as hard failures for fix planning/retry loops.
 - Verify-imports: local `direct_url=file://...` distributions are no longer auto-skipped by default; env-repair now probes `mamba/conda search --json` and force-reinstalls via conda when a managed candidate exists.
 - Verify-imports: report JSON now includes a dedicated `timeouts` field.

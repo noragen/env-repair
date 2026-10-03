@@ -546,7 +546,7 @@ def _conda_meta_owns_distinfo(env_path, *, conda_pkg_name, dist_name, version):
     return False
 
 
-def _apply_same_version_case_conflicts(env, entries, manager, channels, ignore_pinned, force_reinstall, debug):
+def _apply_same_version_case_conflicts(env, entries, manager, channels, ignore_pinned, force_reinstall, debug, use_uv=False):
     fixes = []
     python_exe = env.get("python")
     pip_items, conda_force = find_same_version_case_conflicts(entries)
@@ -574,7 +574,7 @@ def _apply_same_version_case_conflicts(env, entries, manager, channels, ignore_p
 
     pip_names = [i["name"] for i in filtered if isinstance(i.get("name"), str)]
     if pip_names and python_exe:
-        ok = pip_uninstall(python_exe, pip_names)
+        ok = pip_uninstall(python_exe, pip_names, use_uv=use_uv)
         fixes.append(
             {
                 "fixed": ok,
@@ -608,7 +608,7 @@ def _apply_same_version_case_conflicts(env, entries, manager, channels, ignore_p
     return fixes
 
 
-def _fix_duplicates(env, entries, manager, channels, ignore_pinned, force_reinstall, prefer, pip_fallback, debug, *, in_conda_env):
+def _fix_duplicates(env, entries, manager, channels, ignore_pinned, force_reinstall, prefer, pip_fallback, debug, *, in_conda_env, use_uv=False):
     fixes = []
     idx = _build_channel_index(entries)
 
@@ -624,6 +624,7 @@ def _fix_duplicates(env, entries, manager, channels, ignore_pinned, force_reinst
                 no_deps=bool(in_conda_env),
                 only_binary=os.name == "nt",
                 ignore_installed=bool(in_conda_env),
+                use_uv=use_uv,
             )
             fixes.append({"fixed": ok, "method": "pip", "package": pkg_norm, "reason_key": "reason_reinstall_duplicates"})
         else:
@@ -642,7 +643,7 @@ def _fix_duplicates(env, entries, manager, channels, ignore_pinned, force_reinst
     return fixes
 
 
-def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, pip_uninstall_flag, debug, *, show_json_output, lang):
+def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, pip_uninstall_flag, debug, *, show_json_output, lang, use_uv=False):
     if not manager:
         return []
 
@@ -920,7 +921,7 @@ def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, 
         relink_targets = sorted(set(to_install) | set(forced_relink))
 
         if to_uninstall:
-            ok2 = pip_uninstall(env["python"], to_uninstall)
+            ok2 = pip_uninstall(env["python"], to_uninstall, use_uv=use_uv)
             fixes.append(
                 {
                     "fixed": ok2,

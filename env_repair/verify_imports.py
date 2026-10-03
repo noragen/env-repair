@@ -755,7 +755,7 @@ def _cleanup_jedi_common_pkg_dir(python_exe):
         return False
 
 
-def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
+def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, use_uv=False):
     if not failures:
         return {"ok": True, "actions": []}
 
@@ -828,6 +828,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                         no_deps=bool(is_conda),
                         only_binary=os.name == "nt",
                         ignore_installed=bool(is_conda),
+                        use_uv=use_uv,
                     )
 
             # Recheck failures after dependency repair and keep only remaining ones.
@@ -886,6 +887,23 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                         "reason": "installed from local file/path (direct_url=file://) and no conda candidate found via search; skip auto-reinstall",
                     }
                 )
+            continue
+
+        # Special-case: some legacy packages are *actively harmful* on modern Python.
+        # nose is unmaintained and breaks on Python 3.12+ because `imp` was removed.
+        # Prefer removing it (keeping the environment usable) rather than skipping and looping forever.
+        if name and normalize_name(name) == "nose" and (missing_mod or "").lower() == "imp":
+            uninstall_kind = "conda" if kind == "conda" else "pip"
+            plan.append(
+                {
+                    "dist": dist_info.name,
+                    "kind": "remove",
+                    "name": None,
+                    "import": failed_import,
+                    "reason": "unfixable on this Python: nose requires removed stdlib module 'imp' (Python 3.12+); remove nose",
+                    "uninstall": {"kind": uninstall_kind, "name": "nose"},
+                }
+            )
             continue
 
         legacy = _legacy_unmaintained_meta(name)
@@ -1194,22 +1212,52 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
             )
             continue
 
-        # pkg_resources is legacy; if setuptools relink did not restore it, avoid pip loop noise.
+        # setuptools/pkg_resources on modern Python:
+        # If `pkg_resources` is missing, this is almost always a broken setuptools install.
+        # In that case, the *correct* fix is to relink/reinstall setuptools via conda.
+        #
+        # Historically we skipped this to avoid pip/conda thrash loops, but in real-world envs
+        # (notably Anaconda base) this can leave a large dependency chain broken (clyent,
+        # anaconda-client, etc.).
         if (
             kind == "conda"
             and name
             and normalize_name(name) == "setuptools"
             and normalize_name(missing_mod or "") == normalize_name("pkg_resources")
         ):
-            plan.append(
-                {
-                    "dist": dist_info.name,
-                    "kind": "skip",
-                    "name": None,
-                    "import": failed_import,
-                    "reason": "legacy pkg_resources missing; skip auto-repair to avoid pip/conda thrash",
-                }
-            )
+            # Newer conda-forge setuptools builds may not ship `pkg_resources` anymore.
+            # When packages still depend on it, the least-bad pragmatic fix is to install setuptools
+            # via pip into the conda env (restoring pkg_resources).
+            if python_exe:
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "pip",
+                        "name": "setuptools",
+                        "import": failed_import,
+                        "reason": "pkg_resources missing; install setuptools via pip to restore pkg_resources",
+                    }
+                )
+            elif manager:
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": "setuptools",
+                        "import": failed_import,
+                        "reason": "pkg_resources missing; force-reinstall setuptools via conda (no python exe for pip)",
+                    }
+                )
+            else:
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "skip",
+                        "name": None,
+                        "import": failed_import,
+                        "reason": "pkg_resources missing but no installer available; skip auto-repair",
+                    }
+                )
             continue
 
         # Handle deprecated wrappers even if defaults are disabled:
@@ -1366,7 +1414,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
     if explicit_pip_rm and python_exe:
         print(f"\nRemoving {len(explicit_pip_rm)} package(s) via pip (remove-only)...")
         print("Pip remove targets:", ", ".join(explicit_pip_rm))
-        ok_rm = pip_uninstall(python_exe, explicit_pip_rm)
+        ok_rm = pip_uninstall(python_exe, explicit_pip_rm, use_uv=use_uv)
         ok_all = ok_all and ok_rm
         actions.append({"action": "pip_uninstall", "count": len(explicit_pip_rm), "ok": ok_rm, "packages": explicit_pip_rm})
 
@@ -1533,7 +1581,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                     actions.append({"action": "conda_relink", "ok": ok_relink})
         if pip_rm and python_exe:
             print(f"\nRemoving {len(pip_rm)} deprecated wrapper package(s) via pip...")
-            ok_rm = pip_uninstall(python_exe, pip_rm)
+            ok_rm = pip_uninstall(python_exe, pip_rm, use_uv=use_uv)
             ok_all = ok_all and ok_rm
             actions.append({"action": "pip_uninstall", "count": len(pip_rm), "ok": ok_rm, "packages": pip_rm})
 
@@ -1554,7 +1602,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                 actions.append({"action": "conda_relink", "ok": ok_relink})
     if pip_rm and python_exe:
         print(f"\nRemoving {len(pip_rm)} deprecated wrapper package(s) via pip...")
-        ok_rm = pip_uninstall(python_exe, pip_rm)
+        ok_rm = pip_uninstall(python_exe, pip_rm, use_uv=use_uv)
         ok_all = ok_all and ok_rm
         actions.append({"action": "pip_uninstall", "count": len(pip_rm), "ok": ok_rm, "packages": pip_rm})
 
@@ -1586,6 +1634,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                 no_deps=no_deps,
                 only_binary=only_binary,
                 ignore_installed=ignore_installed,
+                use_uv=use_uv,
             )
             ok_all = ok_all and ok
             actions.append(
@@ -1610,14 +1659,14 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug):
                         ok_all = False
                         continue
 
-                    ver = pip_get_version(python_exe, pkg)
+                    ver = pip_get_version(python_exe, pkg, use_uv=use_uv)
                     ver_str = ver or "unknown"
                     print(f"    ! Import still fails after reinstall; removing via pip: {pkg}=={ver_str}")
                     if err_imp:
                         first_lines = err_imp.splitlines()[:8]
                         for line in first_lines:
                             print(f"      {line}")
-                    ok_rm = pip_uninstall(python_exe, [pkg])
+                    ok_rm = pip_uninstall(python_exe, [pkg], use_uv=use_uv)
                     ok_all = ok_all and ok_rm
                     actions.append(
                         {
@@ -1856,6 +1905,7 @@ def verify_imports(args):
             manager,
             base_prefix=base_prefix,
             debug=show_json_output,
+            use_uv=getattr(args, "use_uv", False),
         )
 
     post_failures = []
@@ -1906,6 +1956,7 @@ def verify_imports(args):
                             no_deps=True,
                             only_binary=(os.name == "nt"),
                             ignore_installed=True,
+                            use_uv=getattr(args, "use_uv", False),
                         )
                         fallback_actions.append({"action": "pip_fallback_reinstall", "package": pkg, "ok": ok_fb})
                     if isinstance(fix_report, dict):

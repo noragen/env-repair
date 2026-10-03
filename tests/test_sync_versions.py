@@ -28,8 +28,11 @@ class TestSyncVersions(unittest.TestCase):
                 pyproject = (sv.ROOT / "pyproject.toml").read_text(encoding="utf-8")
                 name = sv._project_name_from_pyproject(pyproject)
 
-                copied = staged / "recipes" / name / "meta.yaml"
+                copied = staged / "recipes" / name / "recipe.yaml"
                 self.assertTrue(copied.exists())
+                self.assertEqual(copied.read_text(encoding="utf-8"), meta_forge.read_text(encoding="utf-8"))
+                self.assertFalse(copied.with_name("meta.yaml").exists())
+                self.assertIn('schema_version: 1', copied.read_text(encoding="utf-8"))
             finally:
                 meta_local.write_text(meta_local_before, encoding="utf-8")
                 meta_forge.write_text(meta_forge_before, encoding="utf-8")

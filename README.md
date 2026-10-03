@@ -87,6 +87,14 @@ pip install .
 
 ## 🔁 Common Workflows
 
+Use `--use-uv` to run pip operations through an available `uv` executable:
+```bat
+env-repair one-shot --env base -y --use-uv
+env-repair verify-imports --env base --full --fix --use-uv
+```
+The selected environment's Python is passed explicitly to uv. If uv is unavailable,
+or a repair requires pip's `--ignore-installed` recovery behavior, pip is used instead.
+
 One-shot repair flow (recommended):
 ```bat
 env-repair one-shot --env base -y

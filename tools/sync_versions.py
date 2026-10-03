@@ -71,6 +71,13 @@ def _replace_set_var(text: str, *, var: str, value: str) -> str:
     return pat.sub(rf"\g<1>{value}\g<3>\g<4>", text, count=1)
 
 
+def _replace_context_var(text: str, *, var: str, value: str) -> str:
+    pattern = re.compile(rf'(?m)^(  {re.escape(var)}:)[^\n]*$')
+    if not pattern.search(text):
+        raise RuntimeError(f'Could not find recipe context variable "{var}"')
+    return pattern.sub(lambda match: f'{match.group(1)} "{value}"', text, count=1)
+
+
 def _build_sdist(*, python_exe: str) -> Optional[Path]:
     # Uses `python -m build --sdist` if available. No network needed.
     dist_dir = ROOT / "dist"
@@ -100,7 +107,7 @@ def main(argv=None) -> int:
         help=(
             "Path to a conda-forge/staged-recipes checkout. "
             "If set, copy conda.recipe/meta-forge.yaml to "
-            "staged-recipes/recipes/env-repair/meta.yaml after syncing."
+            "staged-recipes/recipes/env-repair/recipe.yaml after syncing."
         ),
     )
     args = ap.parse_args(argv)
@@ -134,9 +141,9 @@ def main(argv=None) -> int:
     meta_forge_text = _read_text(meta_forge)
 
     meta_local_text = _replace_set_var(meta_local_text, var="version", value=version)
-    meta_forge_text = _replace_set_var(meta_forge_text, var="version", value=version)
+    meta_forge_text = _replace_context_var(meta_forge_text, var="version", value=version)
     meta_local_text = _replace_set_var(meta_local_text, var="name", value=name)
-    meta_forge_text = _replace_set_var(meta_forge_text, var="name", value=name)
+    meta_forge_text = _replace_context_var(meta_forge_text, var="name", value=name)
 
     if sha256:
         # Update `sha256: ...` (first occurrence only).
@@ -151,7 +158,7 @@ def main(argv=None) -> int:
     copied_to = None
     if args.staged_recipes:
         sr_root = Path(args.staged_recipes).resolve()
-        target = sr_root / "recipes" / name / "meta.yaml"
+        target = sr_root / "recipes" / name / "recipe.yaml"
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(str(meta_forge), str(target))
         copied_to = target

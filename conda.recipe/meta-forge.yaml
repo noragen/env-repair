@@ -1,37 +1,53 @@
-{% set name = "env-repair" %}
-{% set version = "0.2.6" %}
-{% set sdist_name = name.replace("-", "_") %}
-{% set pypi_first = name[0] %}
+schema_version: 1
+
+context:
+  name: env-repair
+  version: "0.2.6"
+  python_min: "3.9"
+  sdist_name: ${{ name | replace("-", "_") }}
+  pypi_first: ${{ name[0] }}
 
 package:
-  name: {{ name }}
-  version: {{ version }}
+  name: ${{ name }}
+  version: ${{ version }}
 
 source:
-  url: https://files.pythonhosted.org/packages/source/{{ pypi_first }}/{{ name }}/{{ sdist_name }}-{{ version }}.tar.gz
+  url: https://files.pythonhosted.org/packages/source/${{ pypi_first }}/${{ name }}/${{ sdist_name }}-${{ version }}.tar.gz
   sha256: e09f536fbb3b250e1e12e3555ef2df1b0181f6efca57e654a1e13df50d40839f
 
 build:
   noarch: python
   number: 0
+  script:
+    - if: win
+      then: '"%PYTHON%" -m pip install . -vv --no-deps --no-build-isolation'
+      else: '"${PYTHON}" -m pip install . -vv --no-deps --no-build-isolation'
+  python:
+    entry_points:
+      - env-repair = env_repair.cli:main
 
 requirements:
   host:
-    - python >=3.9
+    - python ${{ python_min }}.*
     - pip
     - setuptools
     - wheel
   run:
-    - python >=3.9
+    - python >=${{ python_min }}
 
-test:
-  imports:
-    - env_repair
-  commands:
-    - env-repair --help
+tests:
+  - python:
+      python_version:
+        - ${{ python_min }}.*
+        - "*"
+      imports:
+        - env_repair
+      pip_check: true
+  - script:
+      - env-repair --help
 
 about:
-  home: https://github.com/noragen/env-repair
+  homepage: https://github.com/noragen/env-repair
   license: MIT
   license_file: LICENSE
   summary: Scan and repair venv/virtualenv/conda/mamba/micromamba/miniforge environments with mixed conda/pip installs.
