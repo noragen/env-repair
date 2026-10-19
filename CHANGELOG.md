@@ -1,6 +1,7 @@
 # Changelog (env-repair)
 
 ## Unreleased
+- Fix `.condarc` channel parsing: do not turn `mirrored_channels` URLs or lists in other settings into explicit `-c` arguments.
 
 ## 0.2.7 (release preparation)
 - Completed optional `--use-uv` support for scan/fix, one-shot, import repairs, adoption and snapshot restoration; retain pip fallback when uv is missing or `--ignore-installed` is needed.

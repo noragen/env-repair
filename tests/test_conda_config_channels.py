@@ -1,8 +1,41 @@
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 
 class TestCondaConfigChannels(unittest.TestCase):
+    def test_only_reads_top_level_channels_list(self):
+        import env_repair.conda_config as cc
+
+        mirrors = (
+            "mirrored_channels:\n"
+            "  conda-forge:\n"
+            "    - https://conda.anaconda.org/conda-forge\n"
+            "    - https://prefix.dev/conda-forge\n"
+        )
+        configs = [
+            "channels:\n  - conda-forge\n" + mirrors,
+            mirrors + "channels:\n  - conda-forge\n",
+            "channels:\n- conda-forge\n\n# next setting\n" + mirrors,
+            "channels: # repositories\n  # primary\n  - conda-forge\n"
+            "proxy_servers:\n  https: http://proxy:8080\n"
+            "custom_multichannels:\n  other:\n    - unrelated-channel\n",
+            "custom_multichannels:\n  channels:\n    - unrelated-channel\n"
+            "channels:\n  - conda-forge\n",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".condarc"
+            with patch.dict(os.environ, {"CONDARC": str(config_path)}):
+                for config in configs:
+                    with self.subTest(config=config):
+                        config_path.write_text(config, encoding="utf-8")
+                        channels = cc.load_conda_channels(
+                            has_conda=True, has_mamba=True
+                        )
+                        self.assertEqual(channels, ["conda-forge"])
+
     def test_falls_back_to_mamba_when_no_conda(self):
         import env_repair.conda_config as cc
 

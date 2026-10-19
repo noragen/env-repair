@@ -27,13 +27,15 @@ def load_conda_channels_from_condarc(*, base_prefix=None):
             raw = line.strip()
             if not raw or raw.startswith("#"):
                 continue
-            if raw.startswith("channels:"):
+            # Only the top-level channels block defines CLI channel arguments.
+            # Mirror URLs and lists in subsequent settings are not channels.
+            if not in_channels and re.match(r"^channels:\s*(?:#.*)?$", line):
                 in_channels = True
                 continue
             if in_channels:
                 if raw.startswith("- "):
                     channels.append(raw[2:].strip())
-                elif re.match(r"^[A-Za-z0-9_-]+\\s*:", raw):
+                else:
                     break
         if channels:
             return channels
