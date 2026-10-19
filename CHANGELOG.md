@@ -1,6 +1,8 @@
 # Changelog (env-repair)
 
 ## Unreleased
+- Detect pip overlays of conda packages even with a single dist-info directory or a masked conda-list entry; compare pip metadata with original conda records and installed-file checksums, then uninstall the overlay before forcing a conda relink.
+- Verify-imports: after a successful conda takeover of a local installation, retry a failing import once with pip uninstall plus conda force-reinstall; skip cleanup for missing external modules or timeouts, and retain the final exception in console diagnostics.
 - Fix `.condarc` channel parsing: do not turn `mirrored_channels` URLs or lists in other settings into explicit `-c` arguments.
 
 ## 0.2.7 (release preparation)

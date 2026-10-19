@@ -1,8 +1,91 @@
+import hashlib
 import json
 import shutil
 from pathlib import Path
 
 from .naming import normalize_name
+
+
+def scan_conda_pip_overwrites(env_path, site_packages):
+    """Find pip metadata that replaced a conda-owned Python distribution.
+
+    A pip INSTALLER alone is normal in many conda builds. Require a changed
+    version or a changed installed-file checksum as additional evidence.
+    """
+    prefix = Path(env_path).resolve()
+    installed = {}
+    for site_pkg in site_packages:
+        for dist in Path(site_pkg).glob("*.dist-info"):
+            try:
+                dist.resolve().relative_to(prefix)
+                if (dist / "INSTALLER").read_text(encoding="utf-8").strip().lower() != "pip":
+                    continue
+                name, version = dist.name[:-len(".dist-info")].rsplit("-", 1)
+                installed.setdefault(normalize_name(name), []).append((dist, name, version))
+            except (OSError, ValueError):
+                continue
+
+    issues = []
+    for record_path in (prefix / "conda-meta").glob("*.json"):
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (not isinstance(record, dict) or not isinstance(record.get("name"), str)
+                or not isinstance(record.get("version"), str)):
+            continue
+        paths_data = record.get("paths_data") or {}
+        paths = paths_data.get("paths", []) if isinstance(paths_data, dict) else []
+        if not isinstance(paths, list):
+            paths = []
+        files = record.get("files") or []
+        if not isinstance(files, list):
+            files = []
+        owned = files + [p.get("_path") for p in paths if isinstance(p, dict)]
+        owned_dists = set()
+        for path in owned:
+            if isinstance(path, str) and ".dist-info/" in path.replace("\\", "/"):
+                parent = path.replace("\\", "/").split(".dist-info/", 1)[0] + ".dist-info"
+                owned_dists.add(parent.lower())
+        owned_names = set()
+        for owned_dist in owned_dists:
+            stem = owned_dist.rsplit("/", 1)[-1][:-len(".dist-info")]
+            if "-" in stem:
+                owned_names.add(normalize_name(stem.rsplit("-", 1)[0]))
+        if normalize_name(record["name"]) not in owned_names:
+            continue
+        for dist, pip_name, version in installed.get(normalize_name(record["name"]), []):
+            changed = []
+            if version != str(record.get("version")):
+                changed.append("version")
+            for path in paths:
+                if not isinstance(path, dict):
+                    continue
+                rel = path.get("_path")
+                if not isinstance(rel, str):
+                    continue
+                target = prefix / rel.replace("\\", "/")
+                try:
+                    target.resolve().relative_to(prefix)
+                    if target.parent.resolve() != dist.resolve():
+                        continue
+                    if target.name not in {"INSTALLER", "METADATA", "RECORD", "WHEEL"}:
+                        continue
+                    checksum = path.get("sha256_in_prefix")
+                    if not checksum and not path.get("prefix_placeholder"):
+                        checksum = path.get("sha256")
+                    if checksum and hashlib.sha256(target.read_bytes()).hexdigest() != checksum:
+                        changed.append(rel)
+                except (OSError, ValueError):
+                    continue
+            if changed:
+                issues.append({
+                    "type": "conda-pip-overwrite", "package": record["name"],
+                    "name": pip_name, "version": version,
+                    "conda_version": record.get("version"),
+                    "dist_path": str(dist), "changed": changed,
+                })
+    return issues
 
 
 def scan_dist_info(site_pkg):

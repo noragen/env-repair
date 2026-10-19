@@ -229,6 +229,15 @@ def _dist_has_local_direct_url(dist_info):
     return parsed.scheme.lower() == "file"
 
 
+def _print_import_error(error):
+    # Keep the exception at the end of a long traceback visible.
+    lines = str(error or "").splitlines()
+    if len(lines) > 16:
+        lines = lines[:4] + ["... (traceback shortened) ..."] + lines[-12:]
+    for line in lines:
+        print(f"      {line}")
+
+
 def _should_skip_local_unmanaged_dist(dist_info, *, kind):
     return kind == "unknown" and _dist_has_local_direct_url(dist_info)
 
@@ -762,6 +771,13 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
     is_conda = is_conda_env(env_path)
     entries = get_env_package_entries(env_path, manager, show_json_output=debug) if (is_conda and manager) else []
     conda_entries_by_name = {normalize_name(e.get("name") or ""): e for e in entries if isinstance(e, dict)}
+    from .scan import scan_conda_pip_overwrites
+
+    failure_sites = {f["dist_path"].parent for f in failures if isinstance(f.get("dist_path"), Path)}
+    overwritten = {
+        normalize_name(i["package"]): i
+        for i in scan_conda_pip_overwrites(env_path, failure_sites)
+    } if is_conda else {}
     initially_installed = set(conda_entries_by_name.keys())
     pyver = _python_major_minor(python_exe) or "unknown"
     blacklist = _load_verify_imports_blacklist()
@@ -856,10 +872,19 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
     actions = []
     for dist_info, f in sorted(by_dist.items(), key=lambda kv: str(kv[0]).lower()):
         failed_import = f.get("import")
+        missing_mod = _extract_missing_module_name(f.get("error"))
         if _should_skip_failure(f):
             plan.append({"dist": dist_info.name, "kind": "skip", "name": None, "import": failed_import, "reason": "platform/expected"})
             continue
         kind, name = _classify_dist(dist_info, conda_entries_by_name=conda_entries_by_name)
+        overwrite = overwritten.get(normalize_name(name or ""))
+        if overwrite and manager:
+            plan.append({
+                "dist": dist_info.name, "kind": "conda", "name": overwrite["package"],
+                "import": failed_import, "pip_cleanup_before_relink": overwrite["name"],
+                "reason": "pip metadata replaced conda-owned files; uninstall pip overlay before conda relink",
+            })
+            continue
         if _dist_has_local_direct_url(dist_info) and normalize_name(name or "") not in conda_entries_by_name:
             candidate = _pick_conda_candidate_for_local_direct_url(
                 manager=manager,
@@ -874,6 +899,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
                         "kind": "conda",
                         "name": candidate,
                         "import": failed_import,
+                        "local_dist_name": name,
                         "reason": "installed from local file/path (direct_url=file://); conda candidate found via search, forcing relink",
                     }
                 )
@@ -1532,6 +1558,12 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
     conda_failed_for_pip = []
     if conda_items and manager:
         pkgs = [p["name"] for p in conda_items]
+        cleanup_names = sorted({p["pip_cleanup_before_relink"] for p in conda_items if p.get("pip_cleanup_before_relink")})
+        if cleanup_names:
+            print("\nRemoving pip overlays before conda relink:", ", ".join(cleanup_names))
+            ok_clean = pip_uninstall(python_exe, cleanup_names, use_uv=use_uv)
+            actions.append({"action": "pip_uninstall_conda_overlay", "packages": cleanup_names, "ok": ok_clean})
+            # Always continue to the force-reinstall, including partial cleanup.
         stubborn = []
         for p in pkgs:
             if _preclean_module_roots_for_conda_package(p):
@@ -1559,6 +1591,41 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
         ok, installed, failed = _install_conda_batched(pkgs)
         ok_all = ok_all and ok
         actions.append({"action": "conda_reinstall_batch", "count": len(pkgs), "ok": ok, "installed": installed, "failed": failed})
+        # Relinking a conda package can leave files from an earlier local pip
+        # installation behind. Retry once with pip's recorded-file cleanup,
+        # then force-reinstall through conda to keep its package records valid.
+        for item in conda_items:
+            pkg = item["name"]
+            local_name = item.get("local_dist_name")
+            imp = item.get("import")
+            if (
+                not local_name
+                or normalize_name(local_name) != normalize_name(pkg)
+                or pkg not in installed
+                or not imp
+                or not imp.isidentifier()
+            ):
+                continue
+            ok_imp, err_imp = check_import(imp, python_exe)
+            actions.append({"action": "conda_local_recheck_import", "package": pkg, "import": imp, "ok": ok_imp, "error": err_imp})
+            missing_dep = _extract_missing_module_name(err_imp)
+            if ok_imp or _is_import_timeout_error(err_imp):
+                continue
+            if missing_dep and normalize_name(missing_dep) != normalize_name(imp):
+                continue
+            print(f"\nImport still fails after relinking {pkg}; cleaning local installation and reinstalling via {manager}...")
+            _print_import_error(err_imp)
+            ok_clean = pip_uninstall(python_exe, [local_name], use_uv=use_uv)
+            actions.append({"action": "pip_uninstall_before_conda_reinstall", "package": local_name, "ok": ok_clean})
+            # Even a failed uninstall may have removed files: always restore.
+            ok_restore = conda_install(
+                env_path, [pkg], manager, configured_channels,
+                ignore_pinned=False, force_reinstall=True,
+            )
+            actions.append({"action": "conda_clean_reinstall", "package": pkg, "ok": ok_restore})
+            ok_final, err_final = check_import(imp, python_exe)
+            actions.append({"action": "conda_clean_recheck_import", "package": pkg, "import": imp, "ok": ok_final, "error": err_final})
+            ok_all = ok_all and ok_restore and ok_final
         conda_failed_for_pip = _collect_defaults_disabled_pip_fallback_candidates(
             conda_items=conda_items,
             failed_pkgs=failed,
@@ -1889,8 +1956,7 @@ def verify_imports(args):
                 for f in failures:
                     print(f"  [FAIL] {f['import']} (from {f['dist']})")
                     if f.get("error"):
-                        for line in f["error"].splitlines()[:8]:
-                            print(f"      {line}")
+                        _print_import_error(f["error"])
             if timeout_results:
                 print(f"\nIgnored {len(timeout_results)} import timeout(s) (not treated as failures):")
                 for t in timeout_results[:12]:
@@ -1933,6 +1999,7 @@ def verify_imports(args):
                     dist = pf.get("dist") or "?"
                     imp = pf.get("import") or "?"
                     print(f"  [FAIL] {imp} (from {dist})")
+                    _print_import_error(pf.get("error"))
                 # Last-chance fallback for stubborn imports in mixed envs:
                 # try pip wheel reinstall for known problematic packages.
                 fallback_targets = sorted(
@@ -1979,6 +2046,7 @@ def verify_imports(args):
                             dist = pf.get("dist") or "?"
                             imp = pf.get("import") or "?"
                             print(f"  [FAIL] {imp} (from {dist})")
+                            _print_import_error(pf.get("error"))
                     else:
                         print("\nPost-fallback: all remaining imports OK.")
             else:

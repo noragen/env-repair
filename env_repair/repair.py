@@ -214,8 +214,16 @@ def _cleanup_duplicate_dist_info(env, debug):
     For each duplicate-dist-info group: remove all dist-info directories (we rely on reinstall afterwards).
     """
     fixes = []
+    overlays = {
+        normalize_name(i["package"]) for i in env.get("issues") or []
+        if i.get("type") == "conda-pip-overwrite" and i.get("package")
+    }
     for issue in list(env.get("issues") or []):
         if issue.get("type") != "duplicate-dist-info":
+            continue
+        # Keep RECORD available for overlay uninstall; never delete the metadata
+        # restored by that repair based on an earlier scan's duplicate paths.
+        if normalize_name(issue.get("package") or "") in overlays:
             continue
         ok = remove_dist_info_paths(issue.get("paths") or [])
         fixes.append(
@@ -550,6 +558,18 @@ def _apply_same_version_case_conflicts(env, entries, manager, channels, ignore_p
     fixes = []
     python_exe = env.get("python")
     pip_items, conda_force = find_same_version_case_conflicts(entries)
+    overwritten = {
+        normalize_name(i["package"]): i
+        for i in env.get("issues") or []
+        if i.get("type") == "conda-pip-overwrite" and i.get("package")
+    }
+    # `conda list` may expose only one record after pip overwrites the files.
+    # Scan evidence comes from the original conda-meta records on disk.
+    pip_items = [i for i in pip_items if normalize_name(i["conda"]) not in overwritten]
+    pip_items.extend(
+        {"name": i["name"], "version": i["version"], "conda": i["package"]}
+        for i in overwritten.values()
+    )
     _debug(debug, "case_conflict_plan", {"pip": pip_items, "conda": conda_force})
 
     # Skip uninstall if the "pip" dist-info is actually owned by the conda package.
@@ -564,6 +584,7 @@ def _apply_same_version_case_conflicts(env, entries, manager, channels, ignore_p
             isinstance(pip_name, str)
             and isinstance(pip_version, str)
             and isinstance(conda_name, str)
+            and normalize_name(conda_name) not in overwritten
             and _conda_meta_owns_distinfo(env_path, conda_pkg_name=conda_name, dist_name=pip_name, version=pip_version)
         ):
             skipped_owned.append({"pip": pip_name, "version": pip_version, "conda": conda_name})
@@ -573,6 +594,8 @@ def _apply_same_version_case_conflicts(env, entries, manager, channels, ignore_p
         _debug(debug, "case_conflict_skip_conda_owned", {"count": len(skipped_owned), "items": skipped_owned})
 
     pip_names = [i["name"] for i in filtered if isinstance(i.get("name"), str)]
+    if pip_names and (not python_exe or not manager):
+        return [{"fixed": False, "method": "conda/pip-repair", "package": "case-conflicts"}]
     if pip_names and python_exe:
         ok = pip_uninstall(python_exe, pip_names, use_uv=use_uv)
         fixes.append(

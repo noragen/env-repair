@@ -43,6 +43,7 @@ from .scan import (
     remove_dist_info_paths,
     remove_invalid_artifact,
     scan_conda_meta_json,
+    scan_conda_pip_overwrites,
     scan_dist_info,
     scan_invalid_artifacts,
     scan_pyd_duplicates,
@@ -91,6 +92,7 @@ def scan_env(env_path):
 
     if is_conda_env(env_path):
         env["issues"].extend(scan_conda_meta_json(env_path))
+        env["issues"].extend(scan_conda_pip_overwrites(env_path, site_pkgs))
 
     return env
 
@@ -910,6 +912,8 @@ def run(args):
                         )
                     elif issue_type == "duplicate-pyd":
                         print(t("issue_duplicate_pyd", lang=lang, base=issue.get("base"), files=issue.get("files")))
+                    elif issue_type == "conda-pip-overwrite":
+                        print(f"  conda/pip overwrite: {issue.get('package')} (conda {issue.get('conda_version')}, pip metadata {issue.get('version')})")
                     elif issue_type == "invalid-artifact":
                         print(t("issue_invalid_artifact", lang=lang, name=issue.get("name")))
                     else:
