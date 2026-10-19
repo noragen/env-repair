@@ -40,6 +40,10 @@ def discover_envs(*, show_json_output):
     for cmd in ("mamba", "conda"):
         if not which(cmd):
             continue
+        # Select by availability, even if this manager's info command fails.
+        # Conda can still supply discovery data without replacing mamba.
+        if manager is None:
+            manager = cmd
         info = run_json_cmd([cmd, "info", "--json"], show_json_output=show_json_output)
         if info and "envs" in info:
             for p in info["envs"]:
@@ -52,8 +56,6 @@ def discover_envs(*, show_json_output):
                 or info.get("base environment")
                 or base_prefix
             )
-            if manager is None:
-                manager = cmd
 
     if which("micromamba"):
         info = run_json_cmd(["micromamba", "env", "list", "--json"], show_json_output=show_json_output)

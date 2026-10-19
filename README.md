@@ -67,6 +67,12 @@ Recommended first run (one-shot):
 env-repair one-shot --env base -y
 ```
 
+`--prefer mamba` is the default, both for one-shot and the regular scan/fix.
+Conda packages use `mamba` whenever it is available in PATH; otherwise `conda`
+is the fallback. A failed `mamba info` call does not switch repairs to conda.
+`--prefer auto` and `--prefer conda` retain this executable selection;
+`--prefer pip` prefers pip packages when fixing duplicates.
+
 Basic scan (auto-discovers conda envs):
 ```bat
 python env_repair.py

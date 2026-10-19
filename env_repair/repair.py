@@ -486,7 +486,7 @@ def _choose_reinstall_method(entries_index, pkg_norm, prefer, pip_fallback):
             return "pip", pkg_norm
         return None, None
 
-    # conda preferred (auto/conda)
+    # Conda packages preferred (mamba/auto/conda); manager selects the executable.
     non_pypi_channels = [c for c in channels if c and c != "pypi"]
     if non_pypi_channels:
         # take shortest name from any conda channel

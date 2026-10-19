@@ -76,7 +76,7 @@ def one_shot(args):
         use_uv=bool(getattr(args, "use_uv", False)),
         adopt_pip=bool(getattr(args, "adopt_pip", False)),
         keep_pip=bool(getattr(args, "keep_pip", False)),
-        prefer=getattr(args, "prefer", "auto"),
+        prefer=getattr(args, "prefer", "mamba"),
         pip_fallback=bool(getattr(args, "pip_fallback", False)),
         no_pip_fallback=bool(getattr(args, "no_pip_fallback", False)),
         channel=list(getattr(args, "channel", []) or []),
@@ -213,7 +213,7 @@ def build_parser():
     osr.add_argument("--use-uv", action="store_true", default=argparse.SUPPRESS, help="Use uv for pip operations if available")
     osr.add_argument("--adopt-pip", action="store_true", help=t("help_adopt_pip", lang=lang))
     osr.add_argument("--keep-pip", action="store_true", help=t("help_keep_pip", lang=lang))
-    osr.add_argument("--prefer", choices=["auto", "conda", "pip"], default="auto", help=t("help_prefer", lang=lang))
+    osr.add_argument("--prefer", choices=["mamba", "auto", "conda", "pip"], default=argparse.SUPPRESS, help=t("help_prefer", lang=lang))
     osr.add_argument("--pip-fallback", action="store_true", help=t("help_pip_fallback", lang=lang))
     osr.add_argument("--no-pip-fallback", action="store_true", help=t("help_no_pip_fallback", lang=lang))
     osr.add_argument("--channel", action="append", default=[], help=t("help_channel", lang=lang))
@@ -294,8 +294,8 @@ def build_parser():
     )
     p.add_argument(
         "--prefer",
-        choices=["auto", "conda", "pip"],
-        default="auto",
+        choices=["mamba", "auto", "conda", "pip"],
+        default="mamba",
         help=t("help_prefer", lang=lang),
     )
     p.add_argument("--pip-fallback", action="store_true", help=t("help_pip_fallback", lang=lang))
