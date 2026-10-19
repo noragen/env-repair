@@ -215,8 +215,9 @@ def _cleanup_duplicate_dist_info(env, debug):
     """
     fixes = []
     overlays = {
-        normalize_name(i["package"]) for i in env.get("issues") or []
+        normalize_name(name) for i in env.get("issues") or []
         if i.get("type") == "conda-pip-overwrite" and i.get("package")
+        for name in (i["package"], i.get("name") or i["package"])
     }
     for issue in list(env.get("issues") or []):
         if issue.get("type") != "duplicate-dist-info":

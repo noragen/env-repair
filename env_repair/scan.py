@@ -52,9 +52,10 @@ def scan_conda_pip_overwrites(env_path, site_packages):
             stem = owned_dist.rsplit("/", 1)[-1][:-len(".dist-info")]
             if "-" in stem:
                 owned_names.add(normalize_name(stem.rsplit("-", 1)[0]))
-        if normalize_name(record["name"]) not in owned_names:
-            continue
-        for dist, pip_name, version in installed.get(normalize_name(record["name"]), []):
+        # The conda provider can have a different name than its Python dist,
+        # e.g. matplotlib-base owns matplotlib-<version>.dist-info.
+        candidates = [item for name in owned_names for item in installed.get(name, [])]
+        for dist, pip_name, version in candidates:
             changed = []
             if version != str(record.get("version")):
                 changed.append("version")

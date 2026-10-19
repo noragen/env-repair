@@ -13,7 +13,7 @@ from .conda_ops import conda_install, conda_install_capture, conda_remove, get_e
 from .conda_config import load_conda_channels
 from .discovery import discover_envs, get_python_exe, select_envs, which
 from .naming import normalize_name
-from .pip_ops import pip_get_version, pip_reinstall, pip_uninstall
+from .pip_ops import pip_reinstall, pip_uninstall
 from .progress import Progress
 from .subprocess_utils import run_json_cmd
 
@@ -495,13 +495,14 @@ def _extract_missing_module_name(error):
 
 def _missing_module_conda_fallback(mod_norm):
     """
-    Map well-known missing private modules to their conda package provider.
+    Map missing modules to conda providers with a different package name.
     """
     if not mod_norm:
         return None
     mapping = {
         normalize_name("_brotli"): "brotli-python",
         normalize_name("_argon2_cffi_bindings"): "argon2-cffi-bindings",
+        normalize_name("matplotlib"): "matplotlib-base",
     }
     return mapping.get(normalize_name(mod_norm))
 
@@ -775,7 +776,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
 
     failure_sites = {f["dist_path"].parent for f in failures if isinstance(f.get("dist_path"), Path)}
     overwritten = {
-        normalize_name(i["package"]): i
+        normalize_name(i["name"]): i
         for i in scan_conda_pip_overwrites(env_path, failure_sites)
     } if is_conda else {}
     initially_installed = set(conda_entries_by_name.keys())
@@ -1715,34 +1716,22 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
                 }
             )
 
-            # If the reinstall succeeded but the import still fails, remove the package (pip-managed only).
+            # A failed import can come from a dependency or DLL. Preserve the
+            # installed package and report failure rather than uninstalling it.
             if ok and imp and imp.isidentifier():
                 ok_imp, err_imp = check_import(imp, python_exe)
                 actions.append({"action": "pip_recheck_import", "package": pkg, "import": imp, "ok": ok_imp})
                 if not ok_imp:
-                    if normalize_name(pkg) in {normalize_name(p) for p in CRITICAL_PIP_PACKAGES}:
-                        print(f"    ! Import still fails for {imp}, but refusing to uninstall critical pip package: {pkg}")
-                        actions.append({"action": "skip_uninstall_critical_pip", "package": pkg, "import": imp})
-                        ok_all = False
-                        continue
-
-                    ver = pip_get_version(python_exe, pkg, use_uv=use_uv)
-                    ver_str = ver or "unknown"
-                    print(f"    ! Import still fails after reinstall; removing via pip: {pkg}=={ver_str}")
-                    if err_imp:
-                        first_lines = err_imp.splitlines()[:8]
-                        for line in first_lines:
-                            print(f"      {line}")
-                    ok_rm = pip_uninstall(python_exe, [pkg], use_uv=use_uv)
-                    ok_all = ok_all and ok_rm
+                    print(f"    ! Import still fails after reinstall; keeping installed package: {pkg}")
+                    _print_import_error(err_imp)
+                    ok_all = False
                     actions.append(
                         {
-                            "action": "pip_uninstall_after_failed_reinstall",
+                            "action": "pip_import_still_failing",
                             "package": pkg,
-                            "version": ver,
                             "import": imp,
                             "import_error": err_imp,
-                            "ok": ok_rm,
+                            "ok": False,
                         }
                     )
 
