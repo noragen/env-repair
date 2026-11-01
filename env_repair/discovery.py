@@ -37,7 +37,7 @@ def discover_envs(*, show_json_output):
 
     add_env(envs, os.environ.get("CONDA_PREFIX"))
 
-    for cmd in ("mamba", "conda"):
+    for cmd in ("mamba", "conda", "micromamba"):
         if not which(cmd):
             continue
         # Select by availability, even if this manager's info command fails.
@@ -45,7 +45,9 @@ def discover_envs(*, show_json_output):
         if manager is None:
             manager = cmd
         info = run_json_cmd([cmd, "info", "--json"], show_json_output=show_json_output)
-        if info and "envs" in info:
+        if not isinstance(info, dict):
+            continue
+        if "envs" in info:
             for p in info["envs"]:
                 add_env(envs, p)
         if info:
@@ -56,16 +58,30 @@ def discover_envs(*, show_json_output):
                 or info.get("base environment")
                 or base_prefix
             )
+            add_env(envs, base_prefix)
+            listing = run_json_cmd([cmd, "env", "list", "--json"], show_json_output=show_json_output)
+            if isinstance(listing, dict):
+                for p in listing.get("envs") or []:
+                    add_env(envs, p)
+            directories = info.get("envs_dirs") or info.get("envs directories") or []
+            if isinstance(directories, list):
+                for directory in directories:
+                    if not isinstance(directory, str):
+                        continue
+                    root = Path(directory)
+                    try:
+                        for child in root.iterdir():
+                            if (child / "conda-meta").is_dir():
+                                add_env(envs, child)
+                    except OSError:
+                        continue
+            if base_prefix:
+                break
 
-    if which("micromamba"):
-        info = run_json_cmd(["micromamba", "env", "list", "--json"], show_json_output=show_json_output)
-        if info and "envs" in info:
-            for p in info["envs"]:
-                add_env(envs, p)
-        if info:
-            base_prefix = info.get("root_prefix") or base_prefix
-            if manager is None:
-                manager = "micromamba"
+    if not base_prefix:
+        base_prefix = os.environ.get("CONDA_ROOT") or os.environ.get("MAMBA_ROOT_PREFIX")
+        if base_prefix:
+            add_env(envs, base_prefix)
 
     return sorted(envs), base_prefix, manager
 

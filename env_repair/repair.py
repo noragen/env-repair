@@ -1,5 +1,6 @@
 import sys
 import json
+import os
 import time
 import re
 from pathlib import Path
@@ -211,7 +212,7 @@ def _remove_invalid_artifacts(env, debug):
 
 def _cleanup_duplicate_dist_info(env, debug):
     """
-    For each duplicate-dist-info group: remove all dist-info directories (we rely on reinstall afterwards).
+    Prune stale metadata while preserving a valid distribution for failed repairs.
     """
     fixes = []
     overlays = {
@@ -226,17 +227,44 @@ def _cleanup_duplicate_dist_info(env, debug):
         # restored by that repair based on an earlier scan's duplicate paths.
         if normalize_name(issue.get("package") or "") in overlays:
             continue
-        ok = remove_dist_info_paths(issue.get("paths") or [])
+        paths = list(dict.fromkeys(Path(path).resolve() for path in issue.get("paths") or []))
+        try:
+            prefix = Path(env["path"]).resolve()
+            for path in paths:
+                path.relative_to(prefix)
+                if not path.name.endswith(".dist-info"):
+                    raise ValueError("not a distribution metadata directory")
+        except (KeyError, ValueError):
+            paths = []
+        valid = []
+        for path in paths:
+            try:
+                metadata = (path / "METADATA").read_text(encoding="utf-8")
+            except OSError:
+                continue
+            names = re.findall(r"(?mi)^Name:\s*([^\r\n]+)", metadata)
+            versions = re.findall(r"(?mi)^Version:\s*([^\r\n]+)", metadata)
+            if names and versions and normalize_name(names[0].strip()) == normalize_name(issue.get("package") or ""):
+                valid.append((path, names[0].strip(), versions[0].strip()))
+        owned = [item for item in valid if _conda_meta_owns_distinfo(
+            env.get("path"), conda_pkg_name=issue.get("package"),
+            dist_name=item[0].name[:-len(".dist-info")].rsplit("-", 1)[0], version=item[2])]
+        candidates = owned or valid
+        if candidates:
+            keeper = max(candidates, key=lambda item: (item[0] / "METADATA").stat().st_mtime)[0]
+            ok = remove_dist_info_paths([path for path in paths if path != keeper])
+        else:
+            keeper = None
+            ok = False
         fixes.append(
             {
                 "fixed": ok,
                 "method": "cleanup",
                 "package": issue.get("package"),
                 "reason_key": "reason_duplicate_dist_info",
+                "preserved": str(keeper) if keeper else None,
             }
         )
-        if ok:
-            env["issues"].remove(issue)
         _debug(debug, "duplicate_dist_info_cleanup", {"package": issue.get("package"), "ok": ok})
     return fixes
 
@@ -482,6 +510,8 @@ def _choose_reinstall_method(entries_index, pkg_norm, prefer, pip_fallback):
     Decide installer for a normalized package based on conda list entries.
     Returns: ("conda"|"pip"|None, package_name_for_installer)
     """
+    if normalize_name(pkg_norm) == "build":
+        return "pip", "build"
     info = entries_index.get(pkg_norm) or {}
     channels = info.get("channels") or set()
     names_by_channel = info.get("names") or {}
@@ -538,19 +568,25 @@ def _conda_meta_record_paths(env_path, conda_pkg_name):
 def _conda_meta_owns_distinfo(env_path, *, conda_pkg_name, dist_name, version):
     if not (env_path and conda_pkg_name and dist_name and version):
         return False
-    needle = f"Lib/site-packages/{dist_name}-{version}.dist-info/".lower()
+    needle = f"site-packages/{dist_name}-{version}.dist-info/".lower()
     for meta_path in _conda_meta_record_paths(env_path, conda_pkg_name):
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8", errors="ignore"))
         except Exception:
             continue
-        files = data.get("files")
-        if not isinstance(files, list):
+        if not isinstance(data, dict):
             continue
+        files = data.get("files") or []
+        files = list(files) if isinstance(files, list) else []
+        paths_data = data.get("paths_data") or {}
+        if not isinstance(paths_data, dict):
+            continue
+        files.extend(path.get("_path") for path in paths_data.get("paths", [])
+                     if isinstance(path, dict))
         for f in files:
             if not isinstance(f, str):
                 continue
-            if f.replace("\\", "/").lower().startswith(needle):
+            if needle in f.replace("\\", "/").lower():
                 return True
     return False
 
@@ -640,6 +676,9 @@ def _fix_duplicates(env, entries, manager, channels, ignore_pinned, force_reinst
     dup_pkgs = [p for p in dup_pkgs if isinstance(p, str)]
     for pkg_norm in dup_pkgs:
         method, name = _choose_reinstall_method(idx, pkg_norm, prefer, pip_fallback)
+        if not method or not name:
+            fixes.append({"fixed": False, "method": "skip", "package": pkg_norm})
+            continue
         if method == "pip":
             py = env.get("python")
             ok = bool(py) and pip_reinstall(
@@ -658,12 +697,15 @@ def _fix_duplicates(env, entries, manager, channels, ignore_pinned, force_reinst
                 manager,
                 channels,
                 ignore_pinned=ignore_pinned,
-                force_reinstall=force_reinstall,
+                force_reinstall=True,
             )
             fixes.append(
                 {"fixed": ok, "method": "mamba/conda", "package": pkg_norm, "reason_key": "reason_reinstall_duplicates"}
             )
         _debug(debug, "duplicate_fix_attempt", {"package": pkg_norm, "method": method, "name": name})
+        if ok:
+            env["issues"] = [issue for issue in env.get("issues") or []
+                             if not (issue.get("type") == "duplicate-dist-info" and issue.get("package") == pkg_norm)]
     return fixes
 
 

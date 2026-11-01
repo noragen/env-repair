@@ -70,6 +70,16 @@ env-repair one-shot --env base -y
 `--prefer mamba` is the default, both for one-shot and the regular scan/fix.
 Conda packages use `mamba` whenever it is available in PATH; otherwise `conda`
 is the fallback. A failed `mamba info` call does not switch repairs to conda.
+Successful mamba discovery uses `mamba env list` and does not additionally invoke
+`conda info`; channel discovery also prefers mamba when external tooling is needed.
+The bootstrap health check still diagnoses an installed **conda** separately,
+even when **mamba** is the installer. These diagnostic calls do not change the
+selected installer. Failures are captured (health probes time out after 30 seconds),
+and known dependency errors are repaired using mamba and local `conda-meta` records
+before retrying conda. Conda error-report uploads are disabled for health probes.
+If the same dependency error survives relinking, bootstrap repair requests a
+strictly newer version of the affected provider and checks conda health again.
+It respects pins and does not uninstall the package or its dependents first.
 `--prefer auto` and `--prefer conda` retain this executable selection;
 `--prefer pip` prefers pip packages when fixing duplicates.
 
@@ -293,6 +303,25 @@ python tools\sync_versions.py --pypi-sdist --staged-recipes staged-recipes
 | `Post-fix: all non-skipped imports OK.` | Automatic repair succeeded for everything that is auto-fixable. | Review skipped imports; handle only those manually if they matter for your workload. |
 
 ### verify-imports auto-repair hints
+
+- A parallel import timeout is retried sequentially with a 90-second limit.
+  If it still times out, `--fix` can request a strictly newer version of an
+  identified conda-managed distribution, respecting pins and checking the import
+  again. Local/pip-only packages are not upgraded for timeouts. Remaining timeouts
+  produce `complete: false` in the report and exit code 1; they are not silently
+  counted as successful checks.
+
+- Shared dependency failures (including missing distribution metadata and module
+  attribute errors) are repaired before dependent packages, with conda targets
+  batched together. Unresolved consumers are reported as `defer`, not silently
+  counted as repaired or repeatedly uninstalled.
+- Duplicate cleanup preserves a valid `.dist-info` directory and keeps the
+  repair pending until reinstallation succeeds. Conda-owned metadata is preferred.
+- After repairing `charset-normalizer`, unowned Windows `.pyd` files shadowing
+  existing conda-owned `cd`/`md` modules (Python source or binary extensions)
+  are moved into the target environment's
+  `.env_repair/quarantine/` directory rather than deleted. Repair actions include
+  original and quarantine paths; conda-owned extensions are left untouched.
 
 - Missing private runtime modules are now mapped to the correct conda providers before regular fix planning:
   - `_brotli` -> `brotli-python`

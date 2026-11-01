@@ -51,7 +51,7 @@ def _print_cmd(cmd):
     sys.stderr.flush()
 
 
-def run_cmd_capture(cmd, *, env=None):
+def run_cmd_capture(cmd, *, env=None, timeout=None):
     """
     Run a command and capture stdout/stderr.
     Returns CompletedProcess-like tuple: (returncode, stdout, stderr).
@@ -59,6 +59,8 @@ def run_cmd_capture(cmd, *, env=None):
     if _should_print_cmd(cmd):
         _print_cmd(cmd)
     run_kwargs = {"capture_output": True, "text": True, "check": False}
+    if timeout is not None:
+        run_kwargs["timeout"] = timeout
     if env is not None:
         run_kwargs["env"] = env
     try:

@@ -1,8 +1,8 @@
 schema_version: 1
 
 context:
-  name: env-repair
-  version: "0.2.6"
+  name: "env-repair"
+  version: "0.2.8"
   python_min: "3.9"
   sdist_name: ${{ name | replace("-", "_") }}
   pypi_first: ${{ name[0] }}

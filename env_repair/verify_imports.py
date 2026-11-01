@@ -2,6 +2,7 @@ import concurrent.futures
 import contextlib
 import os
 import json
+import re
 import subprocess
 import shutil
 import signal
@@ -9,7 +10,7 @@ import sys
 from urllib.parse import urlparse
 from pathlib import Path
 
-from .conda_ops import conda_install, conda_install_capture, conda_remove, get_env_package_entries, is_conda_env
+from .conda_ops import conda_install, conda_install_capture, conda_remove, conda_upgrade_dependencies, get_env_package_entries, is_conda_env
 from .conda_config import load_conda_channels
 from .discovery import discover_envs, get_python_exe, select_envs, which
 from .naming import normalize_name
@@ -507,6 +508,167 @@ def _missing_module_conda_fallback(mod_norm):
     return mapping.get(normalize_name(mod_norm))
 
 
+def _import_failure_cause(error):
+    text = str(error or "")
+    metadata = re.findall(r"PackageNotFoundError: No package metadata was found for ([\w.-]+)", text)
+    if metadata:
+        return metadata[-1], True
+    modules = re.findall(r"(?:AttributeError: (?:partially initialized )?module|ImportError: cannot import name [^\n]+ from) ['\"]([\w.]+)['\"]", text)
+    if modules:
+        if modules[-1] == "conda.plugins" and "CondaAuthHandler" in text and "anaconda-auth" in text:
+            return "anaconda_auth", False
+        return modules[-1].split(".", 1)[0], False
+    if "anaconda-auth" in text and "CondaAuthHandler" in text:
+        return "anaconda_auth", False
+    missing = _extract_missing_module_name(error)
+    return (missing, False) if missing else (None, False)
+
+
+def _failure_is_external(error, import_name):
+    cause, metadata = _import_failure_cause(error)
+    return bool(cause and (metadata or normalize_name(cause) != normalize_name(import_name or "")))
+
+
+def _quarantine_charset_extensions(env_path, sites):
+    prefix = Path(env_path).resolve()
+    owned = set()
+    records = list((prefix / "conda-meta").glob("*.json"))
+    for record_path in records:
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"ok": False, "moved": [], "reason": "unreadable conda ownership record"}
+        if not isinstance(record, dict):
+            return {"ok": False, "moved": [], "reason": "invalid conda ownership record"}
+        files = record.get("files") or []
+        paths_data = record.get("paths_data") or {}
+        if not isinstance(paths_data, dict) or not isinstance(files, list):
+            return {"ok": False, "moved": [], "reason": "invalid conda ownership paths"}
+        paths = paths_data.get("paths") or []
+        if not isinstance(paths, list):
+            return {"ok": False, "moved": [], "reason": "invalid conda ownership paths"}
+        owned.update(str(path).replace("\\", "/").lower() for path in files)
+        owned.update(str(path.get("_path", "")).replace("\\", "/").lower()
+                     for path in paths if isinstance(path, dict))
+    moved = []
+    for site in sites:
+        root = Path(site) / "charset_normalizer"
+        for stem in ("cd", "md"):
+            replacements = []
+            for candidate in root.glob(f"{stem}.*"):
+                if not candidate.is_file() or candidate.suffix not in {".py", ".pyd"}:
+                    continue
+                try:
+                    relative = candidate.resolve().relative_to(prefix)
+                except ValueError:
+                    continue
+                if relative.as_posix().lower() in owned:
+                    replacements.append(candidate)
+            if not replacements:
+                continue
+            for binary in root.glob(f"{stem}*.pyd"):
+                if binary.name.split(".", 1)[0] != stem:
+                    continue
+                try:
+                    relative = binary.resolve().relative_to(prefix)
+                except ValueError:
+                    continue
+                if relative.as_posix().lower() in owned:
+                    continue
+                from uuid import uuid4
+                destination = prefix / ".env_repair" / "quarantine" / uuid4().hex / relative
+                try:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(binary), str(destination))
+                except OSError as exc:
+                    return {"ok": False, "moved": moved, "error": str(exc)}
+                moved.append({"source": str(binary), "destination": str(destination)})
+                print(f"Quarantined unowned extension: {binary} -> {destination}")
+    return {"ok": True, "moved": moved}
+
+
+def _repair_import_dependencies(failures, *, python_exe, env_path, manager, entries, channels, use_uv=False):
+    by_name = {normalize_name(e.get("name") or ""): e for e in entries if isinstance(e, dict)}
+    providers = {}
+    for record_path in (Path(env_path) / "conda-meta").glob("*.json"):
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+            continue
+        entry = dict(record, channel=record.get("channel") or "conda-meta")
+        by_name[normalize_name(record["name"])] = entry
+        for owned_path in record.get("files") or []:
+            if not isinstance(owned_path, str):
+                continue
+            relative = owned_path.replace("\\", "/").split("site-packages/", 1)
+            if len(relative) != 2:
+                continue
+            top = relative[1].split("/", 1)[0]
+            if top.endswith(".dist-info") and "-" in top:
+                dist_name = top[:-len(".dist-info")].rsplit("-", 1)[0]
+                by_name[normalize_name(dist_name)] = entry
+            else:
+                module = top[:-3] if top.endswith(".py") else top
+                if module.isidentifier():
+                    providers.setdefault(normalize_name(module), set()).add(record["name"])
+    sites = {f["dist_path"].parent for f in failures if isinstance(f.get("dist_path"), Path)}
+    for site in sites:
+        for dist in site.glob("*.dist-info"):
+            name = _read_metadata_name(dist)
+            if name:
+                provider_name = (by_name.get(normalize_name(name)) or {}).get("name") or name
+                for module in get_toplevel_imports(dist):
+                    providers.setdefault(normalize_name(module), set()).add(provider_name)
+    targets = {"conda": set(), "pip": set()}
+    causes = set()
+    for failure in failures:
+        if _should_skip_failure(failure):
+            continue
+        cause, metadata = _import_failure_cause(failure.get("error"))
+        if not cause or cause in {"imp", "fcntl", "pkg_resources"}:
+            continue
+        cause_key = normalize_name(cause)
+        names = {cause} if metadata else providers.get(cause_key, {cause})
+        if len(names) != 1:
+            continue
+        name = next(iter(names))
+        entry = by_name.get(normalize_name(name))
+        if entry and "pypi" not in (entry.get("channel") or "").lower() and manager:
+            targets["conda"].add(entry.get("name") or name)
+        elif entry or cause_key in providers:
+            local_dists = [dist for site in sites for dist in site.glob("*.dist-info")
+                           if normalize_name(_read_metadata_name(dist) or "") == normalize_name(name)]
+            if any(_dist_has_local_direct_url(dist) for dist in local_dists):
+                continue
+            targets["pip"].add(name)
+        else:
+            fallback = _missing_module_conda_fallback(cause_key)
+            if not fallback or not manager:
+                continue
+            targets["conda"].add(fallback)
+        causes.add(cause_key)
+    actions = []
+    for kind, packages in targets.items():
+        if not packages:
+            continue
+        packages = sorted(packages)
+        print(f"\nPriority: repairing {kind} dependency targets: {', '.join(packages)}")
+        if kind == "conda":
+            ok = conda_install(env_path, packages, manager, channels, ignore_pinned=False, force_reinstall=True)
+            if ok and any(normalize_name(name) == "charset-normalizer" for name in packages):
+                quarantine = _quarantine_charset_extensions(env_path, sites)
+                actions.append(dict(quarantine, action="quarantine_charset_extensions"))
+        else:
+            results = [pip_reinstall(python_exe, name, no_deps=is_conda_env(env_path),
+                                    only_binary=os.name == "nt", ignore_installed=is_conda_env(env_path),
+                                    use_uv=use_uv) for name in packages]
+            ok = all(results)
+        actions.append({"action": f"{kind}_dependency_reinstall", "packages": packages, "ok": ok})
+    return causes, actions
+
+
 def _is_protobuf_generatedfile_mismatch_error(err):
     if not err:
         return False
@@ -793,75 +955,24 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
     nodefaults = "nodefaults" in configured_channels
     has_defaults = ("defaults" in configured_channels) or ("anaconda" in configured_channels)
 
-    # Stage 0: If failures are caused by a missing dependency module, fix that first.
-    missing = {}
-    for f in failures:
-        mod = _extract_missing_module_name(f.get("error"))
-        if mod:
-            missing[normalize_name(mod)] = missing.get(normalize_name(mod), 0) + 1
-    if missing:
-        conda_targets = []
-        pip_targets = []
-        for mod_norm in sorted(missing.keys()):
-            fallback_conda = _missing_module_conda_fallback(mod_norm)
-            if fallback_conda and manager:
-                conda_targets.append(fallback_conda)
+    dependency_causes, dependency_actions = _repair_import_dependencies(
+        failures, python_exe=python_exe, env_path=env_path, manager=manager,
+        entries=entries, channels=configured_channels, use_uv=use_uv,
+    )
+    if dependency_actions:
+        remaining = []
+        for failure in failures:
+            imp = failure.get("import")
+            if not isinstance(imp, str) or not imp.isidentifier():
+                remaining.append(failure)
                 continue
-            entry = conda_entries_by_name.get(mod_norm) or {}
-            if entry:
-                conda_name = entry.get("name") or mod_norm
-                # Some conda packages (e.g. flatbuffers) are non-Python libs and won't fix a missing import.
-                if manager and not _conda_pkg_has_site_packages_files(env_path, conda_name):
-                    pip_targets.append(mod_norm)
-                else:
-                    conda_targets.append(conda_name)
-                continue
-            # If listed as a pip entry via conda list (channel pypi), treat as pip.
-            if mod_norm in initially_installed and ((entry.get("channel") or "").lower() == "pypi"):
-                pip_targets.append(entry.get("name") or mod_norm)
-        if conda_targets or pip_targets:
-            print("\nPriority: missing modules detected; repairing dependencies first...")
-            if conda_targets and manager:
-                conda_targets = sorted(set(conda_targets))
-                print("Conda dependency targets:", ", ".join(conda_targets))
-                ok_dep = conda_install(
-                    env_path,
-                    conda_targets,
-                    manager,
-                    configured_channels,
-                    ignore_pinned=False,
-                    force_reinstall=True,
-                )
-                if not ok_dep:
-                    actions = [{"action": "conda_dependency_reinstall", "ok": False, "packages": conda_targets}]
-                    return {"ok": False, "plan": [], "actions": actions}
-            if pip_targets:
-                pip_targets = sorted(set(pip_targets))
-                print("Pip dependency targets:", ", ".join(pip_targets))
-                for pkg in pip_targets:
-                    pip_reinstall(
-                        python_exe,
-                        pkg,
-                        no_deps=bool(is_conda),
-                        only_binary=os.name == "nt",
-                        ignore_installed=bool(is_conda),
-                        use_uv=use_uv,
-                    )
+            ok, error = check_import(imp, python_exe)
+            if not ok:
+                remaining.append(dict(failure, error=error))
+        failures = remaining
+        if not failures:
+            return {"ok": True, "plan": [], "actions": dependency_actions}
 
-            # Recheck failures after dependency repair and keep only remaining ones.
-            still = []
-            for f in failures:
-                imp = f.get("import")
-                if not imp or not isinstance(imp, str):
-                    still.append(f)
-                    continue
-                ok, err = check_import(imp, python_exe)
-                if not ok:
-                    f["error"] = err
-                    still.append(f)
-            failures = still
-            if not failures:
-                return {"ok": True, "plan": [], "actions": [{"action": "dependency_repair_only", "ok": True}]}
 
     by_dist = {}
     for f in failures:
@@ -870,7 +981,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             by_dist.setdefault(dist_info, f)
 
     plan = []
-    actions = []
+    actions = list(dependency_actions)
     for dist_info, f in sorted(by_dist.items(), key=lambda kv: str(kv[0]).lower()):
         failed_import = f.get("import")
         missing_mod = _extract_missing_module_name(f.get("error"))
@@ -878,73 +989,13 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             plan.append({"dist": dist_info.name, "kind": "skip", "name": None, "import": failed_import, "reason": "platform/expected"})
             continue
         kind, name = _classify_dist(dist_info, conda_entries_by_name=conda_entries_by_name)
-        overwrite = overwritten.get(normalize_name(name or ""))
-        if overwrite and manager:
-            plan.append({
-                "dist": dist_info.name, "kind": "conda", "name": overwrite["package"],
-                "import": failed_import, "pip_cleanup_before_relink": overwrite["name"],
-                "reason": "pip metadata replaced conda-owned files; uninstall pip overlay before conda relink",
-            })
-            continue
-        if _dist_has_local_direct_url(dist_info) and normalize_name(name or "") not in conda_entries_by_name:
-            candidate = _pick_conda_candidate_for_local_direct_url(
-                manager=manager,
-                dist_name=name,
-                failed_import=failed_import,
-                debug=debug,
-            )
-            if candidate and manager:
-                plan.append(
-                    {
-                        "dist": dist_info.name,
-                        "kind": "conda",
-                        "name": candidate,
-                        "import": failed_import,
-                        "local_dist_name": name,
-                        "reason": "installed from local file/path (direct_url=file://); conda candidate found via search, forcing relink",
-                    }
-                )
-            else:
-                plan.append(
-                    {
-                        "dist": dist_info.name,
-                        "kind": "skip",
-                        "name": None,
-                        "import": failed_import,
-                        "reason": "installed from local file/path (direct_url=file://) and no conda candidate found via search; skip auto-reinstall",
-                    }
-                )
-            continue
-
-        # Special-case: some legacy packages are *actively harmful* on modern Python.
-        # nose is unmaintained and breaks on Python 3.12+ because `imp` was removed.
-        # Prefer removing it (keeping the environment usable) rather than skipping and looping forever.
-        if name and normalize_name(name) == "nose" and (missing_mod or "").lower() == "imp":
-            uninstall_kind = "conda" if kind == "conda" else "pip"
-            plan.append(
-                {
-                    "dist": dist_info.name,
-                    "kind": "remove",
-                    "name": None,
-                    "import": failed_import,
-                    "reason": "unfixable on this Python: nose requires removed stdlib module 'imp' (Python 3.12+); remove nose",
-                    "uninstall": {"kind": uninstall_kind, "name": "nose"},
-                }
-            )
-            continue
-
         legacy = _legacy_unmaintained_meta(name)
         if legacy:
-            plan.append(
-                {
-                    "dist": dist_info.name,
-                    "kind": "skip",
-                    "name": None,
-                    "import": failed_import,
-                    "reason": f"{legacy['reason']}: {name}; {legacy['hint']}",
-                }
-            )
+            plan.append({"dist": dist_info.name, "kind": "skip", "name": None,
+                         "import": failed_import,
+                         "reason": f"{legacy['reason']}: {name}; {legacy['hint']}"})
             continue
+
 
         # The verify-imports blacklist is about conda solver failures. Do not block pip repairs.
         if _is_blacklist_skip_active(
@@ -1373,6 +1424,50 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             )
             continue
 
+        cause, _metadata_missing = _import_failure_cause(f.get("error"))
+        if _failure_is_external(f.get("error"), failed_import) or normalize_name(cause or "") in dependency_causes:
+            plan.append({"dist": dist_info.name, "kind": "defer", "name": None,
+                         "import": failed_import,
+                         "reason": f"unresolved failure in {cause}; preserving installation after dependency check"})
+            continue
+        overwrite = overwritten.get(normalize_name(name or ""))
+        if overwrite and manager:
+            plan.append({
+                "dist": dist_info.name, "kind": "conda", "name": overwrite["package"],
+                "import": failed_import, "pip_cleanup_before_relink": overwrite["name"],
+                "reason": "pip metadata replaced conda-owned files; uninstall pip overlay before conda relink",
+            })
+            continue
+        if _dist_has_local_direct_url(dist_info) and normalize_name(name or "") not in conda_entries_by_name:
+            candidate = _pick_conda_candidate_for_local_direct_url(
+                manager=manager,
+                dist_name=name,
+                failed_import=failed_import,
+                debug=debug,
+            )
+            if candidate and manager:
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "conda",
+                        "name": candidate,
+                        "import": failed_import,
+                        "local_dist_name": name,
+                        "reason": "installed from local file/path (direct_url=file://); conda candidate found via search, forcing relink",
+                    }
+                )
+            else:
+                plan.append(
+                    {
+                        "dist": dist_info.name,
+                        "kind": "skip",
+                        "name": None,
+                        "import": failed_import,
+                        "reason": "installed from local file/path (direct_url=file://) and no conda candidate found via search; skip auto-reinstall",
+                    }
+                )
+            continue
+
         if kind == "conda" and nodefaults and not has_defaults:
             entry = conda_entries_by_name.get(normalize_name(name or "")) or {}
             ch = (entry.get("channel") or "").lower()
@@ -1420,7 +1515,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
 
     _print_fix_plan(plan)
 
-    ok_all = True
+    ok_all = not any(p.get("kind") == "defer" for p in plan)
 
     # Explicit removals (no install dependency).
     explicit_conda_rm, explicit_pip_rm = _collect_explicit_removals(plan)
@@ -1609,10 +1704,9 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
                 continue
             ok_imp, err_imp = check_import(imp, python_exe)
             actions.append({"action": "conda_local_recheck_import", "package": pkg, "import": imp, "ok": ok_imp, "error": err_imp})
-            missing_dep = _extract_missing_module_name(err_imp)
             if ok_imp or _is_import_timeout_error(err_imp):
                 continue
-            if missing_dep and normalize_name(missing_dep) != normalize_name(imp):
+            if _failure_is_external(err_imp, imp):
                 continue
             print(f"\nImport still fails after relinking {pkg}; cleaning local installation and reinstalling via {manager}...")
             _print_import_error(err_imp)
@@ -1821,21 +1915,60 @@ def get_toplevel_imports(dist):
     name = dist.name.split("-")[0].replace("_", ".")
     return [name] if name else []
 
-def check_import(package_name, python_exe):
+def check_import(package_name, python_exe, *, timeout=30):
     """
     Run `python -c "import <name>"` via subprocess.
     Returns (ok: bool, error_message: str|None).
     """
     cmd = [python_exe, "-c", f"import {package_name}"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if proc.returncode == 0:
             return True, None
         return False, proc.stderr.strip()
     except subprocess.TimeoutExpired:
-        return False, "Import timed out (>30s)"
+        return False, f"Import timed out (>{timeout}s)"
     except Exception as e:
         return False, str(e)
+
+def _retry_import_timeouts(results, *, python_exe, env_path, manager, base_prefix, fix, quiet=False):
+    retried = []
+    actions = []
+    for result in results:
+        if not result.get("ok") and _is_import_timeout_error(result.get("error")):
+            if not quiet:
+                print(f"Retrying timed-out import sequentially (90s): {result['import']}")
+            ok, error = check_import(result["import"], python_exe, timeout=90)
+            result = dict(result, ok=ok, error=error)
+            actions.append({"action": "timeout_retry", "import": result["import"], "ok": ok, "error": error})
+        retried.append(result)
+    persistent = [result for result in retried if not result.get("ok") and _is_import_timeout_error(result.get("error"))]
+    if not (persistent and fix and manager and is_conda_env(env_path)):
+        return retried, actions
+    entries = get_env_package_entries(env_path, manager, show_json_output=False)
+    by_name = {normalize_name(entry.get("name") or ""): entry for entry in entries if isinstance(entry, dict)}
+    packages = set()
+    for result in persistent:
+        dist = result.get("dist_path")
+        if not isinstance(dist, Path):
+            continue
+        kind, name = _classify_dist(dist, conda_entries_by_name=by_name)
+        if kind == "conda" and name and not _legacy_unmaintained_meta(name):
+            packages.add(name)
+    if not packages:
+        return retried, actions
+    channels = load_conda_channels(base_prefix=base_prefix, has_conda=which("conda"),
+                                   has_mamba=which("mamba"), show_json_output=False)
+    ok = conda_upgrade_dependencies(env_path, sorted(packages), manager, channels)
+    actions.append({"action": "timeout_dependency_upgrade", "packages": sorted(packages), "ok": ok})
+    if ok:
+        for index, result in enumerate(retried):
+            if not result.get("ok") and _is_import_timeout_error(result.get("error")):
+                ok_import, error = check_import(result["import"], python_exe, timeout=90)
+                retried[index] = dict(result, ok=ok_import, error=error)
+                actions.append({"action": "timeout_upgrade_recheck", "import": result["import"], "ok": ok_import, "error": error})
+    return retried, actions
+
 
 def verify_imports(args):
     # `--debug` should show command lines, but avoid dumping huge `--json` payloads by default.
@@ -1931,6 +2064,13 @@ def verify_imports(args):
         print("\nInterrupted verify-imports; waiting for running checks to stop...", file=sys.stderr)
         raise
 
+    initial_timeouts = [r for r in results if (not r["ok"]) and _is_import_timeout_error(r.get("error"))]
+    timeout_actions = []
+    if initial_timeouts:
+        results, timeout_actions = _retry_import_timeouts(
+            results, python_exe=python_exe, env_path=env_path, manager=manager,
+            base_prefix=base_prefix, fix=bool(getattr(args, "fix", False)), quiet=bool(args.json),
+        )
     timeout_results = [r for r in results if (not r["ok"]) and _is_import_timeout_error(r.get("error"))]
     failures = [r for r in results if (not r["ok"]) and not _is_import_timeout_error(r.get("error"))]
 
@@ -1947,7 +2087,7 @@ def verify_imports(args):
                     if f.get("error"):
                         _print_import_error(f["error"])
             if timeout_results:
-                print(f"\nIgnored {len(timeout_results)} import timeout(s) (not treated as failures):")
+                print(f"\nIncomplete verification: {len(timeout_results)} import timeout(s) remain unresolved:")
                 for t in timeout_results[:12]:
                     print(f"  [TIMEOUT] {t['import']} (from {t['dist']})")
 
@@ -1996,6 +2136,7 @@ def verify_imports(args):
                         _stubborn_import_pip_target(pf.get("import"))
                         for pf in post_failures
                         if _stubborn_import_pip_target(pf.get("import"))
+                        and not _failure_is_external(pf.get("error"), pf.get("import"))
                     }
                 )
                 if fallback_targets:
@@ -2039,15 +2180,21 @@ def verify_imports(args):
                     else:
                         print("\nPost-fallback: all remaining imports OK.")
             else:
-                print("\nPost-fix: all non-skipped imports OK.")
+                if timeout_results:
+                    print("\nPost-fix: no remaining non-skipped import errors; verification remains incomplete due to timeouts.")
+                else:
+                    print("\nPost-fix: all non-skipped imports OK.")
     else:
         post_failures = [
             {"dist": f.get("dist"), "import": f.get("import"), "error": f.get("error")} for f in failures
         ]
 
-    ok_all = len(post_failures) == 0 and (fix_report is None or bool(fix_report.get("ok")))
+    ok_all = len(post_failures) == 0 and not timeout_results and (fix_report is None or bool(fix_report.get("ok")))
 
     report = {
+        "complete": not timeout_results,
+        "timeout_actions": timeout_actions,
+        "initial_timeouts": [{"dist": result.get("dist"), "import": result.get("import"), "error": result.get("error")} for result in initial_timeouts],
         "env": env_path,
         "python": python_exe,
         "checks": len(to_check),

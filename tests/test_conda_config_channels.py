@@ -54,7 +54,7 @@ class TestCondaConfigChannels(unittest.TestCase):
         self.assertEqual(ch, ["conda-forge", "nodefaults"])
         self.assertIn(["mamba", "config", "list", "--json"], calls)
 
-    def test_prefers_conda_when_available(self):
+    def test_falls_back_to_conda_when_mamba_config_fails(self):
         import env_repair.conda_config as cc
 
         calls = []

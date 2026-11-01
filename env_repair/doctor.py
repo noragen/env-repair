@@ -11,6 +11,7 @@ from .conda_ops import (
     conda_health_check,
     conda_repair_core,
     conda_repair_python_runtime,
+    conda_upgrade_dependencies,
     env_update_from_yaml,
     env_create_from_yaml,
     dry_run_install,
@@ -209,6 +210,8 @@ def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
     if status == "no-plugins-only":
         msg = "Conda core works only with plugins disabled"
     if not args.json:
+        if manager and manager != "conda":
+            print(f"Installer: {manager}. Conda is checked separately for bootstrap health; repairs use {manager}.")
         if not ok:
             print(msg + ".")
         if detail and detail.get("stderr"):
@@ -228,6 +231,61 @@ def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
         return False
 
     ok_repair = True
+    attempted_causes = {}
+    upgraded_causes = set()
+    for dependency_pass in range(4):
+        if ok or not detail or not detail.get("stderr"):
+            break
+        from .verify_imports import _repair_import_dependencies
+
+        base_python = get_python_exe(base_prefix)
+        sites = get_site_packages(base_python) if base_python else []
+        if sites:
+            probe = {"import": "conda", "error": detail["stderr"],
+                     "dist_path": Path(sites[0]) / "conda.dist-info"}
+            from .verify_imports import _import_failure_cause
+            cause, _ = _import_failure_cause(detail["stderr"])
+            if cause in attempted_causes:
+                packages = attempted_causes[cause]
+                if cause in upgraded_causes or not packages:
+                    setattr(args, "_conda_core_ok", False)
+                    return False
+                upgraded_causes.add(cause)
+                upgraded = conda_upgrade_dependencies(base_prefix, packages, repair_manager, channels)
+                if not upgraded:
+                    if not args.json:
+                        print("Dependency upgrade failed; retaining installed packages and respecting pins.")
+                    setattr(args, "_conda_core_ok", False)
+                    return False
+                ok, degraded, detail = conda_health_check(show_json_output=bool(getattr(args, "debug", False)))
+                continue
+            _, dependency_actions = _repair_import_dependencies(
+                [probe], python_exe=base_python, env_path=base_prefix,
+                manager=repair_manager,
+                entries=[],
+                channels=channels,
+            )
+            if dependency_actions:
+                attempted_causes[cause] = sorted({
+                    package for action in dependency_actions
+                    if action.get("action") == "conda_dependency_reinstall"
+                    for package in action.get("packages") or []
+                })
+                if any(not action.get("ok") for action in dependency_actions):
+                    setattr(args, "_conda_core_ok", False)
+                    return False
+                ok, degraded, detail = conda_health_check(show_json_output=bool(getattr(args, "debug", False)))
+            else:
+                break
+        else:
+            break
+    if not ok and upgraded_causes:
+        if not args.json:
+            print("Conda remains unhealthy after targeted upgrades; no repeated reinstall or automatic removal.")
+            if detail and detail.get("stderr"):
+                print(detail["stderr"])
+        setattr(args, "_conda_core_ok", False)
+        return False
     if not ok:
         if not args.json:
             print("Attempting conda core repair (force-reinstall)...")
@@ -243,7 +301,7 @@ def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
 
     ok_after, degraded_after, _detail_after = conda_health_check(show_json_output=bool(getattr(args, "debug", False)))
     abi_after = _scan_base_has_abi_residue()
-    needs_stage2 = bool(abi_residue) or (not ok_after) or bool(degraded_after) or abi_after
+    needs_stage2 = bool(abi_residue) or abi_after
 
     ok_stage2 = True
     if needs_stage2:
