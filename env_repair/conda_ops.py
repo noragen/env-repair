@@ -13,18 +13,30 @@ def _pick_runner():
         return "mamba"
     if shutil.which("conda"):
         return "conda"
+    if shutil.which("micromamba"):
+        return "micromamba"
     return None
 
 
 def _env_no_plugins():
     env = dict(os.environ)
-    env.setdefault("CONDA_NO_PLUGINS", "true")
+    env["CONDA_NO_PLUGINS"] = "true"
     return env
 
 
 def _conda_info_json_capture(*, show_json_output, env=None):
     cmd = ["conda", "info", "--json"]
-    rc, out, err = run_cmd_capture(cmd, env=env)
+    probe_env = dict(os.environ if env is None else env)
+    probe_env["CONDA_REPORT_ERRORS"] = "false"
+    if show_json_output:
+        mode = "disabled" if probe_env.get("CONDA_NO_PLUGINS") == "true" else "enabled"
+        print(f"Conda health diagnostic (plugins {mode}; not installer selection).")
+    try:
+        rc, out, err = run_cmd_capture(cmd, env=probe_env, timeout=30)
+    except subprocess.TimeoutExpired:
+        return None, "", "Conda health diagnostic timed out after 30 seconds", 124
+    except OSError as exc:
+        return None, "", str(exc), 127
     if rc != 0 or not out:
         return None, out, err, rc
     try:
@@ -43,8 +55,10 @@ def conda_health_check(*, show_json_output):
         return True, False, {"status": "no-conda"}
 
     data, out, err, rc = _conda_info_json_capture(show_json_output=show_json_output)
-    if data is not None:
+    if data is not None and "Error while loading conda entry point" not in (err or ""):
         return True, False, {"status": "ok"}
+    if data is not None:
+        return False, True, {"status": "plugin-error", "stderr": err.strip()}
 
     data_np, out_np, err_np, rc_np = _conda_info_json_capture(
         show_json_output=show_json_output, env=_env_no_plugins()
@@ -96,6 +110,35 @@ def conda_repair_python_runtime(*, base_prefix, manager, channels, ignore_pinned
         ignore_pinned=ignore_pinned,
         force_reinstall=force_reinstall,
     )
+
+
+def conda_upgrade_dependencies(env_path, packages, manager, channels):
+    from .naming import normalize_name
+    import re
+
+    requested = {normalize_name(name) for name in packages}
+    versions = {}
+    for path in (Path(env_path) / "conda-meta").glob("*.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        name, version = record.get("name"), record.get("version")
+        if not isinstance(name, str) or normalize_name(name) not in requested:
+            continue
+        if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9_.!+]+", version):
+            return False
+        key = normalize_name(name)
+        if key in versions and versions[key] != (name, version):
+            return False
+        versions[key] = (name, version)
+    if not requested or set(versions) != requested:
+        return False
+    specs = [f"{name}>{version}" for name, version in sorted(versions.values())]
+    print("Persistent dependency failure; requesting strictly newer versions:", ", ".join(specs))
+    return conda_install(env_path, specs, manager, channels, ignore_pinned=False, force_reinstall=False)
 
 
 def is_conda_env(env_path):

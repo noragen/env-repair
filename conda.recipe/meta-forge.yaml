@@ -1,8 +1,8 @@
 schema_version: 1
 
 context:
-  name: env-repair
-  version: "0.2.6"
+  name: "env-repair"
+  version: "0.2.8"
   python_min: "3.9"
   sdist_name: ${{ name | replace("-", "_") }}
   pypi_first: ${{ name[0] }}
@@ -13,7 +13,7 @@ package:
 
 source:
   url: https://files.pythonhosted.org/packages/source/${{ pypi_first }}/${{ name }}/${{ sdist_name }}-${{ version }}.tar.gz
-  sha256: e09f536fbb3b250e1e12e3555ef2df1b0181f6efca57e654a1e13df50d40839f
+  sha256: 1f7f6123c8d223204cef1d51fc2b00f1be3cd4816d620fa91f6ed19f5efcd07e
 
 build:
   noarch: python

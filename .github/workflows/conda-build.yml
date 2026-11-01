@@ -12,24 +12,26 @@ on:
 
 jobs:
   conda-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Miniconda
-        uses: conda-incubator/setup-miniconda@v3
+        uses: conda-incubator/setup-miniconda@v4
         with:
           auto-update-conda: true
           python-version: "3.13"
           channels: conda-forge
+          conda-remove-defaults: true
           channel-priority: strict
 
       - name: Install conda-build
         shell: bash -l {0}
         run: |
-          conda install -y conda-build
+          conda install -y -n base --override-channels -c conda-forge conda-build
+          conda run --no-capture-output -n base conda-build --version
 
       - name: Build recipe
         shell: bash -l {0}
         run: |
-          conda build conda.recipe
+          conda run --no-capture-output -n base conda-build conda.recipe
