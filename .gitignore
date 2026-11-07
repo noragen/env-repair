@@ -12,3 +12,7 @@ __pycache__/
 /dist
 /env_repair.egg-info
 /anaconda_token.key
+/itest/envs/
+/itest/reports/
+/itest/runs/
+/scratch/

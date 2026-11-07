@@ -56,6 +56,28 @@ def scan_conda_pip_overwrites(env_path, site_packages):
         # e.g. matplotlib-base owns matplotlib-<version>.dist-info.
         candidates = [item for name in owned_names for item in installed.get(name, [])]
         for dist, pip_name, version in candidates:
+            healthy = []
+            for path in paths:
+                if not isinstance(path, dict) or not isinstance(path.get("_path"), str):
+                    continue
+                target = prefix / path["_path"].replace("\\", "/")
+                checksum = path.get("sha256_in_prefix") or (path.get("sha256") if not path.get("prefix_placeholder") else None)
+                try:
+                    target.resolve().relative_to(prefix)
+                    if target.name != "METADATA" or target.parent.parent.resolve() == dist.parent.resolve():
+                        continue
+                    stem = target.parent.name.removesuffix(".dist-info")
+                    owner_name, owner_version = stem.rsplit("-", 1)
+                    if normalize_name(owner_name) != normalize_name(pip_name) or owner_version != record["version"]:
+                        continue
+                    if checksum and hashlib.sha256(target.read_bytes()).hexdigest() == checksum:
+                        healthy.append(target.parent)
+                except (OSError, ValueError):
+                    continue
+            if healthy and dist.resolve() not in {path.resolve() for path in healthy}:
+                issues.append({"type": "stale-dist-info", "package": pip_name, "provider": record["name"],
+                               "path": str(dist), "replacement": str(healthy[0])})
+                continue
             changed = []
             if version != str(record.get("version")):
                 changed.append("version")
@@ -95,6 +117,15 @@ def scan_dist_info(site_pkg):
     for p in Path(site_pkg).iterdir():
         if p.is_dir() and p.name.endswith(".dist-info"):
             dist_infos.append(p.name)
+            try:
+                metadata = (p / "METADATA").read_text(encoding="utf-8", errors="replace")
+            except FileNotFoundError:
+                metadata = ""
+            except OSError:
+                continue
+            if not metadata.strip():
+                issues.append({"type": "invalid-dist-info", "path": str(p), "name": p.name,
+                               "reason": "METADATA missing or empty"})
 
     versions = {}
     paths = {}

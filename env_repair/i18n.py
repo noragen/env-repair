@@ -1,5 +1,8 @@
 import locale
 import os
+import re
+from functools import lru_cache
+from string import Formatter
 
 
 MESSAGES = {
@@ -121,16 +124,16 @@ MESSAGES = {
         "prompt_interrupted": "Abgebrochen. (r)estore aus Snapshot, (c)ontinue, (a)bort? [a]: ",
         "prompt_approve": "Fortfahren? [j/N]: ",
         "abort": "Abgebrochen.",
-        "manager_missing": "Kein conda/mamba/micromamba im PATH gefunden; manche Aktionen sind nicht verfuegbar.",
+        "manager_missing": "Kein conda/mamba/micromamba im PATH gefunden; manche Aktionen sind nicht verfügbar.",
         "rollback_plan": "Rollback-Plan: {from_rev} -> {to_rev}",
-        "rollback_no_revisions": "keine conda Revisions fuer dieses Environment gefunden",
-        "rollback_invalid_target": "ungueltiges Rollback-Ziel: {to}",
+        "rollback_no_revisions": "keine conda Revisions für dieses Environment gefunden",
+        "rollback_invalid_target": "ungültiges Rollback-Ziel: {to}",
         "rollback_done": "Rollback fertig: {to_rev}",
         "rebuild_plan": "Rebuild-Plan: {src} -> {dst}",
         "rebuild_done": "Rebuild fertig: {dst}",
         "rebuild_target_exists": "Rebuild-Ziel existiert bereits: {dst}",
-        "rebuild_need_yes": "Rebuild braucht Bestaetigung (mit -y/--yes ohne Rueckfrage)",
-        "plan_only": "nur Plan (keine Aenderungen)",
+        "rebuild_need_yes": "Rebuild braucht Bestätigung (mit -y/--yes ohne Rückfrage)",
+        "plan_only": "nur Plan (keine Änderungen)",
         "clobber_header": "Clobber-Diagnose:",
         "clobber_no_log": "keine Logdatei angegeben",
         "clobber_no_paths": "keine Konfliktpfade im Log gefunden",
@@ -147,28 +150,28 @@ MESSAGES = {
         "ssl_header": "SSL-Diagnose:",
         "ssl_ok": "ssl import ok: {value}",
         "ssl_fail": "ssl import fehlgeschlagen: {value}",
-        "ssl_hint": "Hinweis: ggf. `mamba install -n base openssl ca-certificates certifi` (oder `conda install ...`) und korrekte conda Aktivierung im Terminal pruefen",
-        "help_desc": "Scan und Repair fuer conda/mamba/micromamba Environments mit gemischten conda/pip Installationen.",
+        "ssl_hint": "Hinweis: ggf. `mamba install -n base openssl ca-certificates certifi` (oder `conda install ...`) und korrekte conda Aktivierung im Terminal prüfen",
+        "help_desc": "Scan und Repair für conda/mamba/micromamba Environments mit gemischten conda/pip Installationen.",
         "help_help": "Hilfe anzeigen und beenden.",
         "help_env_multi": "Environment Name(n) oder Pfad(e). Wiederholbar. Default: alle gefundenen Envs.",
-        "help_fix": "Reparaturen ausfuehren (safe-ish).",
+        "help_fix": "Reparaturen ausführen (safe-ish).",
         "help_adopt_pip": "Versuche pip-installierte Pakete durch conda Pakete zu ersetzen.",
         "help_keep_pip": "pip-Version behalten, auch wenn adopt-pip erfolgreich ist (Default: pip-Version entfernen).",
-        "help_prefer": "Bevorzugter Installer beim Fixen von Duplikaten (Default: mamba). Conda-Pakete werden mit mamba installiert, falls vorhanden, sonst mit conda/micromamba; auto/conda behalten diese Auswahl bei. Separate Conda-Gesundheitschecks sind weiterhin moeglich. pip bevorzugt pip-Pakete.",
-        "help_pip_fallback": "pip Reinstall erlauben, wenn conda/mamba fehlschlaegt.",
+        "help_prefer": "Bevorzugter Installer beim Fixen von Duplikaten (Default: mamba). Conda-Pakete werden mit mamba installiert, falls vorhanden, sonst mit conda/micromamba; auto/conda behalten diese Auswahl bei. Separate Conda-Gesundheitschecks sind weiterhin möglich. pip bevorzugt pip-Pakete.",
+        "help_pip_fallback": "pip Reinstall erlauben, wenn conda/mamba fehlschlägt.",
         "help_no_pip_fallback": "pip Fallback deaktivieren.",
-        "help_channel": "Conda Channel(s) hinzufuegen. Wiederholbar.",
+        "help_channel": "Conda Channel(s) hinzufügen. Wiederholbar.",
         "help_no_channels_from_condarc": "Channels aus .condarc/conda config ignorieren.",
-        "help_no_default_channels": "defaults/anaconda nicht automatisch hinzufuegen.",
+        "help_no_default_channels": "defaults/anaconda nicht automatisch hinzufügen.",
         "help_ignore_pinned": "Conda Pins (pinned specs) beim Install ignorieren.",
         "help_force_reinstall": "Pakete via conda/mamba erneut installieren (force-reinstall).",
         "help_snapshot": "Env-Export YAML nach diesem Pfad schreiben (nur conda Envs).",
         "help_json": "Maschinenlesbares JSON ausgeben.",
         "help_debug": "Debug-Ausgabe + JSON Tool-Output anzeigen.",
-        "help_cmd_rollback": "Rollback eines conda Envs auf eine fruehere Revision.",
+        "help_cmd_rollback": "Rollback eines conda Envs auf eine frühere Revision.",
         "help_cmd_rebuild": "Rebuild: Env exportieren und als neues Env neu erstellen.",
         "help_cmd_diagnose_clobber": "ClobberError Log parsen und Datei-Owner bestimmen.",
-        "help_cmd_diagnose_inconsistent": 'Pruefen, ob ein Env "inconsistent" ist (conda Warnung).',
+        "help_cmd_diagnose_inconsistent": 'Prüfen, ob ein Env "inconsistent" ist (conda Warnung).',
         "help_cmd_fix_inconsistent": 'Versuch, ein "inconsistent" Env zu reparieren.',
         "help_cmd_cache_check": "Conda Package Cache Locations anzeigen.",
         "help_cmd_cache_fix": "Conda Package Caches bereinigen.",
@@ -176,8 +179,8 @@ MESSAGES = {
         "help_env_single": "Environment Name oder Pfad.",
         "help_to": "Ziel: prev|latest|<N> (Default: prev).",
         "help_dry_run": "Aktion nur simulieren.",
-        "help_yes": "Keine Rueckfrage (auto bestaetigen).",
-        "help_plan": "Nur Plan anzeigen (keine Aenderungen).",
+        "help_yes": "Keine Rückfrage (auto bestätigen).",
+        "help_plan": "Nur Plan anzeigen (keine Änderungen).",
         "help_to_rebuild": "Ziel-Environment Name oder Pfad.",
         "help_verify": "Neues Env nach Erstellung scannen.",
         "help_logfile": "Pfad zur conda/mamba Output-Logdatei.",
@@ -211,18 +214,18 @@ MESSAGES = {
         "fix_ok": "ok",
         "fix_failed": "fehlgeschlagen",
         "fix_report": "Fix-Report:",
-        "fix_report_none": "keine Fixes ausgefuehrt",
+        "fix_report_none": "keine Fixes ausgeführt",
         "col_action": "aktion",
         "col_item": "element",
         "col_result": "ergebnis",
         "col_reason": "grund",
-        "reason_stale_artifact": "veraltetes/ungueltiges Artefakt in site-packages",
-        "reason_duplicate_dist_info": "doppelte .dist-info Eintraege erkannt",
-        "reason_conda_meta_reinstall": "defekte conda-meta Records (depends fehlt / JSON ungueltig)",
+        "reason_stale_artifact": "veraltetes/ungültiges Artefakt in site-packages",
+        "reason_duplicate_dist_info": "doppelte .dist-info Einträge erkannt",
+        "reason_conda_meta_reinstall": "defekte conda-meta Records (depends fehlt / JSON ungültig)",
         "reason_case_conflict_pip_uninstall": "pip+conda haben gleiche Version mit unterschiedlicher Schreibweise installiert",
         "reason_case_conflict_conda_relink": "conda Paket nach pip-Uninstall erneut relinken",
         "reason_reinstall_duplicates": "Reinstall um Duplikate zu beheben",
-        "reason_adopt_conda_install": "gemappte conda Pakete fuer pip-Kandidaten installieren",
+        "reason_adopt_conda_install": "gemappte conda Pakete für pip-Kandidaten installieren",
         "reason_adopt_skip_keep": "{pip} behalten (pip {pip_version}), weil conda {conda} Version {conda_version} hat",
         "reason_adopt_pip_uninstall": "pip-Duplikate nach conda Install entfernen (nur wenn Versionen matchen)",
         "reason_adopt_pip_force_uninstall": "pip-Paket entfernen, weil conda-Ersatz bereits vorhanden ist",
@@ -230,6 +233,37 @@ MESSAGES = {
         "reason_adopt_conda_relink": "conda Pakete nach pip-Uninstall erneut relinken",
     },
 }
+
+
+from .i18n_messages import TEXTS
+
+MESSAGES["en"].update({source: source for source in TEXTS})
+MESSAGES["de"].update(TEXTS)
+
+
+def tr(source, **kwargs):
+    source = str(source)
+    if not kwargs and source not in TEXTS:
+        for template, translated in TEXTS.items():
+            if "{value" not in template or len(re.sub(r"\{[^}]*\}", "", template)) < 16:
+                continue
+            pattern, fields = _message_pattern(template)
+            match = pattern.fullmatch(source)
+            if match:
+                return t(template, lang="auto", **dict(zip(fields, match.groups())))
+    return t(source, lang="auto", **kwargs)
+
+
+@lru_cache(maxsize=None)
+def _message_pattern(template):
+    fields = []
+    pattern = []
+    for literal, field, _, _ in Formatter().parse(template):
+        pattern.append(re.escape(literal))
+        if field is not None:
+            fields.append(field)
+            pattern.append("(.*?)")
+    return re.compile("".join(pattern), re.DOTALL), fields
 
 
 def detect_lang():
@@ -241,7 +275,7 @@ def detect_lang():
                 return "de"
             return "en"
     try:
-        loc = locale.getdefaultlocale()[0]  # noqa: UP010 (keep compat)
+        loc = locale.getlocale()[0]
     except Exception:
         loc = None
     if isinstance(loc, str) and loc.lower().startswith("de"):

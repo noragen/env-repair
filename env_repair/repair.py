@@ -1,6 +1,8 @@
+from .i18n import tr
 import sys
 import json
 import os
+import shutil
 import time
 import re
 from pathlib import Path
@@ -210,11 +212,95 @@ def _remove_invalid_artifacts(env, debug):
     return fixes
 
 
+def _repair_invalid_dist_info(env, manager, channels):
+    from uuid import uuid4
+
+    prefix = Path(env["path"]).resolve()
+    fixes = []
+    providers = set()
+    records = []
+    for path in (prefix / "conda-meta").glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            records.append(data)
+    for issue in list(env.get("issues") or []):
+        if issue.get("type") != "invalid-dist-info":
+            continue
+        path = Path(issue["path"])
+        try:
+            relative = path.resolve().relative_to(prefix)
+            if not path.name.endswith(".dist-info") or not path.is_dir() or path.is_symlink():
+                raise ValueError("unsafe metadata path")
+            metadata = path / "METADATA"
+            if metadata.is_file() and metadata.read_text(encoding="utf-8", errors="replace").strip():
+                continue
+            owned_prefix = relative.as_posix().lower() + "/"
+            owners = set()
+            for record in records:
+                files = list(record.get("files") or [])
+                paths_data = record.get("paths_data") or {}
+                if isinstance(paths_data, dict):
+                    files.extend(item.get("_path") for item in paths_data.get("paths", []) if isinstance(item, dict))
+                if any(isinstance(item, str) and item.replace("\\", "/").lower().startswith(owned_prefix) for item in files):
+                    if isinstance(record.get("name"), str):
+                        owners.add(record["name"])
+            destination = prefix / ".env_repair" / "quarantine" / uuid4().hex / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(destination))
+        except (OSError, ValueError) as exc:
+            fixes.append({"fixed": False, "method": "quarantine", "artifact": issue["name"], "error": str(exc)})
+            continue
+        print(tr('Quarantined invalid metadata: {value0} -> {value1}', value0=path, value1=destination))
+        fixes.append({"fixed": True, "method": "quarantine", "artifact": issue["name"],
+                      "source": str(path), "destination": str(destination), "providers": sorted(owners)})
+        providers.update(owners)
+        env["issues"].remove(issue)
+    if providers:
+        packages = sorted(providers)
+        print(tr('Conda metadata recovery targets:'), ", ".join(packages))
+        ok = bool(manager) and conda_install(str(prefix), packages, manager, channels,
+                                           ignore_pinned=False, force_reinstall=True)
+        fixes.append({"fixed": ok, "method": "mamba/conda", "package": ", ".join(packages)})
+    return fixes
+
+
 def _cleanup_duplicate_dist_info(env, debug):
     """
     Prune stale metadata while preserving a valid distribution for failed repairs.
     """
+    from uuid import uuid4
+
     fixes = []
+    for issue in list(env.get("issues") or []):
+        if issue.get("type") != "stale-dist-info":
+            continue
+        try:
+            from .scan import scan_conda_pip_overwrites
+
+            prefix = Path(env["path"]).resolve()
+            path = Path(issue["path"]).resolve()
+            replacement = Path(issue["replacement"]).resolve()
+            path.relative_to(prefix)
+            replacement.relative_to(prefix)
+            if path == replacement or not path.name.endswith(".dist-info"):
+                raise ValueError("invalid stale metadata path")
+            evidence = scan_conda_pip_overwrites(prefix, [path.parent, replacement.parent])
+            if not any(item.get("type") == "stale-dist-info" and Path(item["path"]).resolve() == path
+                       and Path(item["replacement"]).resolve() == replacement for item in evidence):
+                raise ValueError("stale metadata evidence changed; rescan required")
+            destination = prefix / ".env_repair" / "quarantine" / uuid4().hex / path.relative_to(prefix)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(destination))
+            print(tr("Quarantined stale metadata: {value0} -> {value1}", value0=path, value1=destination))
+            fixes.append({"fixed": True, "method": "quarantine", "package": issue["package"],
+                          "source": str(path), "destination": str(destination), "preserved": str(replacement),
+                          "reason_key": "stale metadata from a previous site-packages layout"})
+            env["issues"].remove(issue)
+        except (OSError, ValueError) as exc:
+            fixes.append({"fixed": False, "method": "quarantine", "package": issue["package"], "error": str(exc)})
     overlays = {
         normalize_name(name) for i in env.get("issues") or []
         if i.get("type") == "conda-pip-overwrite" and i.get("package")
@@ -835,8 +921,8 @@ def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, 
         return []
 
     pkgs = sorted(set(to_install))
-    print(f"{t('step_adopt_pip', lang=lang)}: {len(pkgs)} conda target(s) via {manager}")
-    print("Conda targets:", ", ".join(pkgs))
+    print(tr('{value0}: {value1} conda target(s) via {value2}', value0=t('step_adopt_pip', lang=lang), value1=len(pkgs), value2=manager))
+    print(tr('Conda targets:'), ", ".join(pkgs))
 
     # Large one-shot solves can be slow and produce little visible output in some terminals.
     # Batch installs to keep the SAT problem size manageable and show steady progress.
@@ -871,7 +957,7 @@ def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, 
                 _save_adopt_pip_blacklist(blacklist)
                 pkgs = [p for p in pkgs if p not in offenders]
                 if pkgs:
-                    print(f"{t('step_adopt_pip', lang=lang)}: retry without incompatible package(s): {', '.join(offenders)}")
+                    print(tr('{value0}: retry without incompatible package(s): {value1}', value0=t('step_adopt_pip', lang=lang), value1=', '.join(offenders)))
                     ok, _out2, _err2 = conda_install_capture(
                         env["path"],
                         pkgs,
@@ -883,7 +969,7 @@ def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, 
     else:
         batches = [pkgs[i : i + batch_size] for i in range(0, len(pkgs), batch_size)]
         for i, batch in enumerate(batches, 1):
-            print(f"{t('step_adopt_pip', lang=lang)}: mamba/conda batch {i}/{len(batches)} ({len(batch)} pkgs)")
+            print(tr('{value0}: mamba/conda batch {value1}/{value2} ({value3} pkgs)', value0=t('step_adopt_pip', lang=lang), value1=i, value2=len(batches), value3=len(batch)))
             batch_ok, out, err = conda_install_capture(
                 env["path"],
                 batch,
@@ -913,7 +999,7 @@ def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, 
                     reduced = [p for p in batch if p not in offenders]
                     if reduced:
                         print(
-                            f"{t('step_adopt_pip', lang=lang)}: retry batch {i}/{len(batches)} without incompatible package(s): {', '.join(offenders)}"
+                            tr('{value0}: retry batch {value1}/{value2} without incompatible package(s): {value3}', value0=t('step_adopt_pip', lang=lang), value1=i, value2=len(batches), value3=', '.join(offenders))
                         )
                         ok_batch2, _out2, _err2 = conda_install_capture(
                             env["path"],
@@ -1016,7 +1102,7 @@ def _adopt_pip(env, entries, manager, channels, ignore_pinned, force_reinstall, 
             else:
                 batches = [pkgs_relink[i : i + batch_size] for i in range(0, len(pkgs_relink), batch_size)]
                 for i, batch in enumerate(batches, 1):
-                    print(f"{t('step_adopt_pip', lang=lang)}: relink batch {i}/{len(batches)} ({len(batch)} pkgs)")
+                    print(tr('{value0}: relink batch {value1}/{value2} ({value3} pkgs)', value0=t('step_adopt_pip', lang=lang), value1=i, value2=len(batches), value3=len(batch)))
                     ok_batch = conda_install(
                         env["path"],
                         batch,

@@ -1,3 +1,4 @@
+from .i18n import tr
 import json
 import os
 import re
@@ -63,6 +64,7 @@ from .repair import (
     _fix_conda_meta_issues,
     _fix_duplicates,
     _remove_invalid_artifacts,
+    _repair_invalid_dist_info,
 )
 
 def _debug(enabled, event, payload):
@@ -211,13 +213,13 @@ def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
         msg = "Conda core works only with plugins disabled"
     if not args.json:
         if manager and manager != "conda":
-            print(f"Installer: {manager}. Conda is checked separately for bootstrap health; repairs use {manager}.")
+            print(tr('Installer: {value0}. Conda is checked separately for bootstrap health; repairs use {value1}.', value0=manager, value1=manager))
         if not ok:
             print(msg + ".")
         if detail and detail.get("stderr"):
             print(detail["stderr"])
         if abi_residue:
-            print("Detected mixed Python ABI residue in .pyd files (e.g. cp312 + cp314).")
+            print(tr('Detected mixed Python ABI residue in .pyd files (e.g. cp312 + cp314).'))
 
     if not _approve(yes=bool(getattr(args, "yes", False)), plan=False, prompt=t("prompt_approve", lang="auto"), lang="auto"):
         if not args.json:
@@ -254,7 +256,7 @@ def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
                 upgraded = conda_upgrade_dependencies(base_prefix, packages, repair_manager, channels)
                 if not upgraded:
                     if not args.json:
-                        print("Dependency upgrade failed; retaining installed packages and respecting pins.")
+                        print(tr('Dependency upgrade failed; retaining installed packages and respecting pins.'))
                     setattr(args, "_conda_core_ok", False)
                     return False
                 ok, degraded, detail = conda_health_check(show_json_output=bool(getattr(args, "debug", False)))
@@ -281,14 +283,14 @@ def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
             break
     if not ok and upgraded_causes:
         if not args.json:
-            print("Conda remains unhealthy after targeted upgrades; no repeated reinstall or automatic removal.")
+            print(tr('Conda remains unhealthy after targeted upgrades; no repeated reinstall or automatic removal.'))
             if detail and detail.get("stderr"):
                 print(detail["stderr"])
         setattr(args, "_conda_core_ok", False)
         return False
     if not ok:
         if not args.json:
-            print("Attempting conda core repair (force-reinstall)...")
+            print(tr('Attempting conda core repair (force-reinstall)...'))
         ok_repair = conda_repair_core(
             base_prefix=base_prefix,
             manager=repair_manager,
@@ -297,7 +299,7 @@ def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
             force_reinstall=True,
         )
         if not ok_repair and not args.json:
-            print("Conda core repair failed.")
+            print(tr('Conda core repair failed.'))
 
     ok_after, degraded_after, _detail_after = conda_health_check(show_json_output=bool(getattr(args, "debug", False)))
     abi_after = _scan_base_has_abi_residue()
@@ -306,7 +308,7 @@ def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
     ok_stage2 = True
     if needs_stage2:
         if not args.json:
-            print("Attempting Python runtime repair (force-reinstall python/menuinst)...")
+            print(tr('Attempting Python runtime repair (force-reinstall python/menuinst)...'))
         ok_stage2 = conda_repair_python_runtime(
             base_prefix=base_prefix,
             manager=repair_manager,
@@ -315,7 +317,7 @@ def _check_and_repair_conda_core(*, args, base_prefix, manager, channels):
             force_reinstall=True,
         )
         if not ok_stage2 and not args.json:
-            print("Python runtime repair failed.")
+            print(tr('Python runtime repair failed.'))
 
     final_ok, final_degraded, _final_detail = conda_health_check(show_json_output=bool(getattr(args, "debug", False)))
     final_abi = _scan_base_has_abi_residue()
@@ -815,6 +817,7 @@ def run(args):
             fixes = []
             try:
                 fixes.extend(_remove_invalid_artifacts(env_report, args.debug))
+                fixes.extend(_repair_invalid_dist_info(env_report, manager if conda_here else None, channels))
                 if conda_here:
                     fixes.extend(
                         _fix_conda_meta_issues(
@@ -971,9 +974,13 @@ def run(args):
                     elif issue_type == "duplicate-pyd":
                         print(t("issue_duplicate_pyd", lang=lang, base=issue.get("base"), files=issue.get("files")))
                     elif issue_type == "conda-pip-overwrite":
-                        print(f"  conda/pip overwrite: {issue.get('package')} (conda {issue.get('conda_version')}, pip metadata {issue.get('version')})")
+                        print(tr('  conda/pip overwrite: {value0} (conda {value1}, pip metadata {value2})', value0=issue.get('package'), value1=issue.get('conda_version'), value2=issue.get('version')))
                     elif issue_type == "invalid-artifact":
                         print(t("issue_invalid_artifact", lang=lang, name=issue.get("name")))
+                    elif issue_type == "invalid-dist-info":
+                        print(tr('  invalid distribution metadata: {value0} ({value1})', value0=issue.get('path'), value1=issue.get('reason')))
+                    elif issue_type == "stale-dist-info":
+                        print(tr("  stale distribution metadata: {value0}; current owner: {value1}", value0=issue.get("path"), value1=issue.get("replacement")))
                     else:
                         print(t("issue_generic", lang=lang, type=issue_type))
             if env.get("pinned"):

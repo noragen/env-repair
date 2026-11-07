@@ -55,6 +55,16 @@ It steps in **after things already went wrong**.
 - `conda` is optional: mamba-only installs (e.g. Mambaforge/Miniforge variants) are supported.
 - Python available in the target environment.
 
+### Output language
+
+env-repair's own prompts, help, progress and repair messages support English and
+German. Selection follows `LC_ALL`, `LC_MESSAGES`, `LANG`, then the system locale;
+other locales fall back to English. For example, use `set LC_ALL=de_DE` or
+`set LC_ALL=en_US` in CMD before starting env-repair. Package names, command-line
+options, JSON field names and diagnostic codes are not translated. Original
+solver messages, installer output and Python tracebacks remain available in
+their original language rather than being rewritten.
+
 ---
 
 ## 🚀 Quick Start
@@ -275,10 +285,16 @@ python release.py --sync
 Sync conda recipe metadata from project version:
 ```bat
 python tools\sync_versions.py
-python tools\sync_versions.py --pypi-sdist --staged-recipes staged-recipes
+python tools\sync_versions.py --pypi-sdist --feedstock env-repair-feedstock
 ```
 
 ---
+
+The feedstock command is for use **after PyPI publication** and preserves
+feedstock-specific recipe settings. Check for an existing bot update PR first.
+The legacy `--staged-recipes` option remains available for initial admissions;
+env-repair updates now belong in `conda-forge/env-repair-feedstock`.
+See [the release guide](docs/releasing.md) for the complete sequence.
 
 ## 📝 Notes
 
@@ -303,6 +319,245 @@ python tools\sync_versions.py --pypi-sdist --staged-recipes staged-recipes
 | `Post-fix: all non-skipped imports OK.` | Automatic repair succeeded for everything that is auto-fixable. | Review skipped imports; handle only those manually if they matter for your workload. |
 
 ### verify-imports auto-repair hints
+
+#### Minimal package sandboxes (not specific to Qt)
+
+`one-shot` and `verify-imports --fix` automatically invoke this fallback when
+normal repairs still leave import failures. No new flag, separate command or
+sandbox confirmation is required. Only unresolved, identified distributions are
+tested: first with the current Python minor, then (for compatibility/validation
+failures) up to two lower supported minors. Network, permission, timeout and
+unclassified installation failures do not cause speculative Python retries.
+Previously sandbox-tested targets in the same run are not tested again.
+Qt still requires an explicitly selected backend; no binding is guessed.
+
+The fallback creates temporary environments, may download packages, and records
+its attempts in the repair report. It never removes original packages or changes
+the original Python. Sandbox success does not clear original failures or turn a
+failed repair into exit code 0. Scan-only runs never invoke it.
+
+Use `sandbox` to test problematic packages or an alternative Python/package
+combination **without repairing, cloning or downgrading the original environment**:
+
+```text
+env-repair sandbox --env base --target scipy --python-version 3.13
+env-repair sandbox --env base --conda-package "numpy>=2" --check-import numpy
+env-repair sandbox --env base --pypi-package "requests==2.32.5" --check-import requests
+```
+
+- `--target` selects an installed distribution at its current version and installer.
+- `--conda-package` / `--pypi-package` specify packages or version constraints to
+  test, including packages not installed in the original. Explicit constraints
+  override the installed-version constraint for the same selected provider.
+- Repeat these options for multiple roots. Only those roots, the chosen Python,
+  pip and their solver-resolved dependencies are installed. Unrelated original
+  packages, local builds and prefix-specific pins are **not** carried over.
+- `--python-version` accepts a major.minor version and defaults to the source
+  interpreter's version. `--manager` selects mamba/conda/micromamba;
+  `--channel` adds channels. A conda-compatible manager is needed for creation;
+  its normal configuration still applies.
+- PyPI targets and dependencies require binary wheels from PyPI; no source
+  builds are attempted. Relevant local targets are copied using guarded `RECORD`
+  entries, without rebuilding or changing the originals. Unsafe paths, startup
+  hooks, missing files, overlaps and relevant local-only conda artifacts block
+  the test. Unrelated local packages are neither copied nor questioned.
+- `pip check` and isolated import checks cover the distributions actually
+  installed in the sandbox, including dependencies. `--check-import` adds
+  specific modules, such as `scipy.linalg`. `env-repair` itself is excluded.
+
+After success, failure or an ordinary interruption, the owned temporary
+environment is removed through the package manager where possible; its complete
+workspace (including downloaded wheels and local copies) is then deleted.
+Read-only files and transient Windows locks are handled with bounded retries.
+Ownership/path checks prevent cleanup from touching the original or unrelated
+directories. If cleanup cannot finish, the exact residual path and error are
+reported; it is never silently claimed to be clean. Previously existing,
+unmarked test environments are not swept up automatically.
+
+Only small diagnostics are retained in
+`.env_repair/reports/sandboxes/<run-id>/migration.json` relative to the working
+directory, with requirements and an optional explicit package manifest. Reports
+record target parameters, tested packages, stage output, failures,
+`validation_ok`, `cleanup` and `scope: target-packages`. An optional package-export
+failure does not invalidate successful import checks. Conda helper names such
+as `_python_abi3_support` are accepted, and native-extension ABI filenames are
+converted to their real import names. Malformed metadata reports identify the
+offending record and stop pointless retries of other Python versions. `--json`
+prints the structured result while progress stays on stderr. Error diagnostics
+distinguish candidate availability, Python constraints, dependency conflicts,
+network/TLS, permissions, timeouts, unsupported wheels and binary/import errors;
+unknown messages stay unknown. These are diagnostic hints, not permission to
+uninstall packages. A generic "no matching distribution" does **not** establish
+whether the cause is Python, platform, missing wheels or an unavailable release.
+See [pip dependency resolution](https://pip.pypa.io/en/stable/topics/dependency-resolution/),
+[PyPI troubleshooting](https://docs.pypi.org/using-pypi/troubleshooting/) and
+[conda exception types](https://docs.conda.io/projects/conda/en/stable/dev-guide/api/conda/exceptions/index.html).
+
+**Sandbox success validates the target combination, not the complete original.**
+In repair flows, env-repair then solves a separate transaction against the
+original environment's complete conda constraints and pins. The full plan,
+including Python changes and dependency removals, is shown and requires its own
+default-no confirmation. Neither `-y` nor `-f` approves this migration. Protected
+runtime/manager packages cannot be removed, and env-repair itself cannot be
+upgraded/downgraded through it (an identical-version relink is allowed).
+
+After approval, an independent temporary Python/mamba installer runs as a
+supervised child process before touching the original interpreter. It rechecks the
+inventory and approved transaction, saves conda/pip snapshots and installs the
+tested packages. A changed plan requires new confirmation; no automatic rollback
+is claimed after a partially failed transaction. Local extensions are not rebuilt.
+
+**Verification runs with the newly installed Python of the original environment**,
+not with the sandbox/installer Python. A prior `one-shot --env base -y -f`, for
+example, runs again as `one-shot --env base -y -f`; its other parsed options are
+preserved too. Environment discovery is checked before rerunning so `base` cannot
+accidentally resolve to the temporary installer. Internal recursion protection
+prevents repeated migration offers during this final run without changing the
+user's options. Missing original pip/local distributions are reported, not silently
+ignored. Only the final original-environment result determines repair success.
+
+The independent installer uses its own Mamba root and does not inherit the
+original shell's conda/mamba activation variables. Activation scripts are backed
+up before bootstrap and checked before verification and cleanup: references to
+the temporary installer are restored from the byte-for-byte backup. If a new
+unsafe activation script cannot be restored, cleanup is blocked and the installer
+is retained for recovery rather than leaving a dangling activation path.
+
+The independent installer is cleaned up after verification using the original
+Python. If that interpreter cannot even start after an installation failure, the
+installer is retained explicitly for recovery and its path is reported. Snapshots,
+application and verification results remain beside the sandbox report. The caller
+waits for the independent installer to exit, then starts and waits for cleanup
+using the original Python. Output from every phase is streamed live; no Windows
+`execv` handoff returns the prompt early. The command returns the final status,
+including verification and cleanup failures. Ctrl+C during this supervised phase
+waits for the child to stop before proceeding; it never deletes a running
+installer's workspace. No manual activation of the temporary environment is needed.
+`application.json` and `application.log` retain the final result and diagnostics.
+
+An installed env-repair must remain at its original version and both its module
+and console command must still start after the Python change and final one-shot.
+Conda transactions cannot change its version/build. For pip installations, a
+checksum-protected local wheel of the original code/metadata is saved beforehand;
+if the distribution or launcher disappears or its version changes, that exact
+version is restored offline without changing dependencies. Failed preservation
+is an error and retains the installer for recovery, never a successful repair.
+
+Sandbox validation supports multiple package-search directories, including Windows
+Python installations exposing both `Lib/site-packages` and
+`lib/python/site-packages`. Official conda/PyPI targets do not require choosing a
+single copy destination. When a permitted local package must be copied, the
+isolated target Python supplies its `sysconfig` `purelib` destination; env-repair
+verifies that it belongs to the intended environment before writing files.
+
+**Requested requirements and the tested lock are separate.** The original install
+command contains only the selected Python minor and target-package requirements,
+including explicit package overrides. Transitive helper packages such as
+`python-gil`, `cpython` and `python_abi` are not promoted to explicit user requests.
+Exact tested versions/builds remain in the diagnostic plan, not the install command.
+The projected final conda state, including unchanged packages, must match that
+tested combination before confirmation and again in the installer. A mismatch
+requires a new sandbox test; it never silently installs an untested combination.
+The installed state is checked again before original-environment verification.
+
+Earlier migration plans that explicitly installed the complete dependency lock
+cannot be replayed; create a fresh plan. Existing historical requirements from
+previous runs are not rewritten or removed automatically. Do not blindly edit
+history or bypass pins to resolve those older conflicts. See
+[validation notes](docs/validation.md) for the observed runs and regression scope.
+
+#### Choosing a Qt backend
+
+Qt compatibility checks print an immediate status line while waiting for the
+solver. Failures display readable solver messages, not the raw JSON response or
+internal C++ locations; structured diagnostics remain in the JSON repair report.
+
+If the chosen conda Qt binding has no solvable installation, a second menu offers:
+
+- Keep everything unchanged (default).
+- Preview removal of the failing conda Qt consumers and their dependents, followed
+  by a separate explicit confirmation. `-y` and `-f` do not authorize this Qt removal.
+- With separate consent, test the two nearest supported lower Python minors in
+  the shared package sandbox. Only the selected binding, affected consumers and
+  their necessary dependencies are installed. QtCore/QtWidgets are additional
+  import checks. No full-original-environment solve is required to run this test,
+  and its success does not change Python or mark original imports repaired.
+
+Noninteractive/JSON reports retain the unresolved status and available recovery
+choices without taking an automatic removal or Python downgrade decision.
+
+In fix mode (`one-shot` or `verify-imports --fix`), unresolved QtPy binding errors
+offer one shared interactive selection for all affected consumers:
+
+- `0` or Enter: keep the environment unchanged (default).
+- `1`: PySide6.
+- `2`: PyQt6.
+
+If `QT_API` is already set, only that backend is offered; it is never silently
+overridden. Legacy PyQt5/PySide2 are offered only when explicitly selected by
+`QT_API`. Neither `-y`, auto-yes nor `-f` chooses a binding. JSON mode and runs
+without a terminal never prompt or install a new backend through this selection.
+
+Conda environments use the selected conda manager, configured channels and pins.
+A dry-run rejects transactions that change Python's version or remove existing
+packages without replacement. A missing compatible build leaves imports unresolved;
+ordinary backend repair never downgrades Python or falls back to pip in a conda
+environment. Python changes require the separately confirmed migration above.
+Plain venvs use their own Python/pip (or opted-in uv), with binary wheels only.
+After installation, every affected import is checked again under the unchanged
+`QT_API`; installer success alone does not count as a repaired import. The choice,
+transaction preview and recheck results are recorded in repair actions.
+
+#### Removing unfixable packages
+
+If packages remain unfixable after normal repair and compatibility tests,
+env-repair can offer removal; this is not restricted to `pkg_resources`. A conda
+dry-run shows package names and versions. General unfixable removal refuses
+unrequested dependent removals and checks mixed pip dependencies too. Confirmation is
+separate: `-y` and `ENV_REPAIR_AUTO_YES` do **not** approve this removal.
+In an interactive terminal, answer the dedicated `[y/N]` question (default: keep).
+Without a terminal or in JSON mode, packages are kept unless explicitly authorized.
+
+Use `-f` / `--remove-unfixable` to explicitly authorize these removals without
+the extra question, after the same safety preview:
+
+```cmd
+env-repair one-shot --env myenv -y -f
+env-repair verify-imports --env myenv --full --fix --remove-unfixable
+```
+
+The flag does not enable fix mode by itself. Eligible leaf packages may include
+Qt consumers or other unresolved imports, but never healthy unrelated packages.
+Protected runtime/manager packages cannot be removed
+through this path, even with `-f`; a failed/incomplete preview blocks removal.
+Pip-installed consumers use pip/uv, but removal is blocked when it would leave
+installed dependents broken (requirements are checked conservatively, including
+conditional requirements). Declined or failed removals remain unresolved in the
+report. Successful removals and the full preview are recorded in repair actions.
+
+- Old site-packages layouts can retain stale metadata after a Python upgrade
+  (for example, PyArrow 23 metadata in `Lib/site-packages` while the verified
+  PyArrow 26 provider lives in `lib/python/site-packages`). If the current
+  conda-owned metadata passes its stored checksum, only the obsolete metadata
+  directory is quarantined after revalidation. The current package is not
+  repeatedly uninstalled with pip or relinked. Package code and conda records
+  are preserved; without intact owner evidence, normal overlay diagnostics remain.
+- The normal scan also detects missing/empty `METADATA` in `.dist-info`
+  directories, a cause of `pip inspect` crashes on newer Python. Fix mode moves
+  damaged metadata into the target environment's `.env_repair/quarantine/`,
+  preserves package code, and relinks known conda owners. Unknown owners are
+  not guessed as PyPI packages. Initial discovery/snapshot commands can still
+  encounter the metadata error before the cleanup phase runs.
+
+- Missing `pkg_resources` can be an obsolete consumer API, not a broken setuptools
+  installation: setuptools 82+ no longer includes it. Repair tries a strictly
+  newer conda-managed consumer; it does not automatically downgrade setuptools
+  or overlay it with pip. Unresolved consumers remain reported as `defer`.
+- QtPy does not install a Qt binding itself. Shared `QtBindingsNotFoundError`
+  failures target an unambiguous installed conda PyQt/PySide binding and respect
+  `QT_API`. If none is installed or the choice is ambiguous, choose a compatible
+  backend explicitly; env-repair does not select a GUI stack or reinstall its
+  consumers automatically.
 
 - A parallel import timeout is retried sequentially with a 90-second limit.
   If it still times out, `--fix` can request a strictly newer version of an

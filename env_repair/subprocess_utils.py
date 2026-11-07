@@ -75,7 +75,7 @@ def run_cmd_capture(cmd, *, env=None, timeout=None):
     return res.returncode, res.stdout, res.stderr
 
 
-def run_cmd_live(cmd, *, env=None):
+def run_cmd_live(cmd, *, env=None, wait_on_interrupt=False):
     """
     Run a command and stream stdout/stderr live.
 
@@ -101,21 +101,33 @@ def run_cmd_live(cmd, *, env=None):
     t_err = threading.Thread(target=_stream_reader, args=(proc.stderr, sys.stderr, err_buf))
     t_out.start()
     t_err.start()
+    interrupted = False
     try:
         rc = proc.wait()
     except KeyboardInterrupt as e:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            pass
-        raise OperationInterrupted(cmd, returncode=130) from e
+        if wait_on_interrupt:
+            interrupted = True
+            while True:
+                try:
+                    rc = proc.wait()
+                    break
+                except KeyboardInterrupt:
+                    continue
+        else:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            raise OperationInterrupted(cmd, returncode=130) from e
     t_out.join()
     t_err.join()
-    return rc
+    proc.stdout.close()
+    proc.stderr.close()
+    return 130 if interrupted else rc
 
 
 def run_cmd_live_capture(cmd, *, env=None):
@@ -162,8 +174,11 @@ def run_cmd_live_capture(cmd, *, env=None):
 def _stream_reader(stream, sink, buffer):
     for line in iter(stream.readline, ""):
         if sink:
-            sink.write(line)
-            sink.flush()
+            try:
+                sink.write(line)
+                sink.flush()
+            except (OSError, UnicodeError):
+                sink = None
         if buffer is not None:
             buffer.append(line)
 

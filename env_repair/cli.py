@@ -1,3 +1,4 @@
+from .i18n import tr
 import argparse
 import json
 import os
@@ -55,7 +56,7 @@ def one_shot(args):
         }
 
     if not getattr(args, "json", False):
-        print(f"One-shot: {env_target}")
+        print(tr('One-shot: {value0}', value0=env_target))
 
     fix_inc_args = argparse.Namespace(
         env=env_target,
@@ -66,7 +67,7 @@ def one_shot(args):
         debug=bool(getattr(args, "debug", False)),
     )
     if not getattr(args, "json", False):
-        print("[1/3] fix-inconsistent")
+        print(tr('[1/3] fix-inconsistent'))
     fix_inc_result = fix_inconsistent(fix_inc_args)
 
     run_args = argparse.Namespace(
@@ -89,20 +90,22 @@ def one_shot(args):
         debug=bool(getattr(args, "debug", False)),
     )
     if not getattr(args, "json", False):
-        print("[2/3] scan + fix")
+        print(tr('[2/3] scan + fix'))
     run_result = run(run_args)
 
     verify_args = argparse.Namespace(
         env=[],
         env_single=env_target,
         use_uv=bool(getattr(args, "use_uv", False)),
+        remove_unfixable=bool(getattr(args, "remove_unfixable", False)),
         full=not bool(getattr(args, "critical_only", False)),
         json=bool(getattr(args, "json", False)),
         debug=bool(getattr(args, "debug", False)),
         fix=True,
+        recovery_options=dict(vars(args)),
     )
     if not getattr(args, "json", False):
-        print("[3/3] verify-imports --fix")
+        print(tr('[3/3] verify-imports --fix'))
     verify_result = verify_imports(verify_args)
 
     step_results = {
@@ -119,7 +122,10 @@ def one_shot(args):
     if ok:
         exit_code = 0
 
-    return {"ok": ok, "exit_code": exit_code, "report": {"env": env_target, "steps": step_results}}
+    result = {"ok": ok, "exit_code": exit_code, "report": {"env": env_target, "steps": step_results}}
+    if verify_result.get("pending_installation"):
+        result["pending_installation"] = verify_result["pending_installation"]
+    return result
 
 
 def build_parser():
@@ -131,6 +137,9 @@ def build_parser():
     )
     p.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
     sub = p.add_subparsers(dest="cmd")
+    from .package_sandbox import configure_parser
+
+    configure_parser(sub.add_parser("sandbox", help=tr('Test selected packages and dependencies in a minimal temporary environment; never modifies the original')))
 
     rb = sub.add_parser(
         "rollback",
@@ -201,8 +210,8 @@ def build_parser():
 
     osr = sub.add_parser(
         "one-shot",
-        help="Run fix-inconsistent + scan/fix + verify-imports in one command",
-        description="Run fix-inconsistent + scan/fix + verify-imports in one command",
+        help=tr('Run fix-inconsistent + scan/fix + verify-imports in one command'),
+        description=tr('Run fix-inconsistent + scan/fix + verify-imports in one command'),
         add_help=False,
     )
     osr.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
@@ -210,7 +219,9 @@ def build_parser():
     osr.add_argument("--level", choices=["safe", "normal", "rebuild"], default="safe", help=t("help_level_inconsistent", lang=lang))
     osr.add_argument("--plan", action="store_true", help=t("help_plan", lang=lang))
     osr.add_argument("-y", "--yes", action="store_true", help=t("help_yes", lang=lang))
-    osr.add_argument("--use-uv", action="store_true", default=argparse.SUPPRESS, help="Use uv for pip operations if available")
+    osr.add_argument("-f", "--remove-unfixable", action="store_true", default=argparse.SUPPRESS,
+                     help=tr('Approve removal of unfixable packages after dependency/protection checks; -y alone never authorizes removal'))
+    osr.add_argument("--use-uv", action="store_true", default=argparse.SUPPRESS, help=tr('Use uv for pip operations if available'))
     osr.add_argument("--adopt-pip", action="store_true", help=t("help_adopt_pip", lang=lang))
     osr.add_argument("--keep-pip", action="store_true", help=t("help_keep_pip", lang=lang))
     osr.add_argument("--prefer", choices=["mamba", "auto", "conda", "pip"], default=argparse.SUPPRESS, help=t("help_prefer", lang=lang))
@@ -222,7 +233,7 @@ def build_parser():
     osr.add_argument("--ignore-pinned", action="store_true", help=t("help_ignore_pinned", lang=lang))
     osr.add_argument("--force-reinstall", action="store_true", help=t("help_force_reinstall", lang=lang))
     osr.add_argument("--snapshot", help=t("help_snapshot", lang=lang))
-    osr.add_argument("--critical-only", action="store_true", help="Verify imports in critical mode only")
+    osr.add_argument("--critical-only", action="store_true", help=tr('Verify imports in critical mode only'))
     osr.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     osr.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
 
@@ -263,8 +274,8 @@ def build_parser():
 
     vi = sub.add_parser(
         "verify-imports",
-        help="Check if installed packages can be imported",
-        description="Verify that packages are importable (finds missing DLLs, etc.)",
+        help=tr('Check if installed packages can be imported'),
+        description=tr('Verify that packages are importable (finds missing DLLs, etc.)'),
         add_help=False,
     )
     vi.add_argument("-h", "--help", action="help", help=t("help_help", lang=lang))
@@ -272,11 +283,14 @@ def build_parser():
     # (multi env selection). Using the same dest causes argparse to overwrite the previously
     # provided top-level value when the subcommand is selected.
     vi.add_argument("--env", dest="env_single", help=t("help_env_single", lang=lang))
-    vi.add_argument("--full", action="store_true", help="Check all packages (default: critical only)")
-    vi.add_argument("--use-uv", action="store_true", default=argparse.SUPPRESS, help="Use uv for pip operations if available")
+    vi.add_argument("--full", action="store_true", help=tr('Check all packages (default: critical only)'))
+    vi.add_argument("--use-uv", action="store_true", default=argparse.SUPPRESS, help=tr('Use uv for pip operations if available'))
     vi.add_argument("--json", action="store_true", help=t("help_json", lang=lang))
     vi.add_argument("--debug", action="store_true", help=t("help_debug", lang=lang))
-    vi.add_argument("--fix", action="store_true", help="Attempt to automatically fix broken imports")
+    vi.add_argument("--fix", action="store_true", help=tr('Attempt to automatically fix broken imports'))
+    vi.add_argument("-y", "--yes", action="store_true", help=tr('Does not approve removal of unfixable packages; use -f or confirm separately'))
+    vi.add_argument("-f", "--remove-unfixable", action="store_true", default=argparse.SUPPRESS,
+                    help=tr('Approve removal of unfixable packages after dependency/protection checks; -y alone never authorizes removal'))
 
     p.add_argument(
         "--env",
@@ -285,7 +299,9 @@ def build_parser():
         help=t("help_env_multi", lang=lang),
     )
     p.add_argument("--fix", action="store_true", help=t("help_fix", lang=lang))
-    p.add_argument("--use-uv", action="store_true", help="Use uv for pip operations if available")
+    p.add_argument("-f", "--remove-unfixable", action="store_true",
+                   help=tr('Approve removal of unfixable packages after dependency/protection checks; -y alone never authorizes removal'))
+    p.add_argument("--use-uv", action="store_true", help=tr('Use uv for pip operations if available'))
     p.add_argument("--adopt-pip", action="store_true", help=t("help_adopt_pip", lang=lang))
     p.add_argument(
         "--keep-pip",
@@ -338,11 +354,26 @@ def main(argv=None):
             result = diagnose_ssl(args)
         elif args.cmd == "verify-imports":
             result = verify_imports(args)
+        elif args.cmd == "sandbox":
+            from .package_sandbox import run_sandbox
+
+            result = run_sandbox(args)
         else:
             result = run(args)
     except (KeyboardInterrupt, OperationInterrupted):
         print(t("interrupted", lang="auto"), file=sys.stderr)
         return 130
+    if result.get("pending_installation"):
+        from .recovery import launch_installation
+
+        try:
+            return launch_installation(result["pending_installation"])
+        except (OperationInterrupted, KeyboardInterrupt):
+            print(t("interrupted", lang="auto"), file=sys.stderr)
+            return 130
+        except (OSError, ValueError) as exc:
+            print(tr("Original installation could not be started: {value0}", value0=tr(exc)), file=sys.stderr)
+            return 1
     if getattr(args, "json", False):
         print(json.dumps(result.get("report"), indent=2))
     return int(result.get("exit_code", 0 if result.get("ok") else 1))

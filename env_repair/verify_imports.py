@@ -1,3 +1,4 @@
+from .i18n import tr
 import concurrent.futures
 import contextlib
 import os
@@ -17,6 +18,8 @@ from .naming import normalize_name
 from .pip_ops import pip_reinstall, pip_uninstall
 from .progress import Progress
 from .subprocess_utils import run_json_cmd
+from .unfixable import remove_unfixable as remove_unfixable_consumers
+from .qt_repair import repair_qt_bindings
 
 CRITICAL_PACKAGES = {
     "pip",
@@ -510,6 +513,8 @@ def _missing_module_conda_fallback(mod_norm):
 
 def _import_failure_cause(error):
     text = str(error or "")
+    if "qtpy.QtBindingsNotFoundError" in text and "No Qt bindings could be found" in text:
+        return "qt-bindings", False
     metadata = re.findall(r"PackageNotFoundError: No package metadata was found for ([\w.-]+)", text)
     if metadata:
         return metadata[-1], True
@@ -583,7 +588,7 @@ def _quarantine_charset_extensions(env_path, sites):
                 except OSError as exc:
                     return {"ok": False, "moved": moved, "error": str(exc)}
                 moved.append({"source": str(binary), "destination": str(destination)})
-                print(f"Quarantined unowned extension: {binary} -> {destination}")
+                print(tr('Quarantined unowned extension: {value0} -> {value1}', value0=binary, value1=destination))
     return {"ok": True, "moved": moved}
 
 
@@ -622,12 +627,37 @@ def _repair_import_dependencies(failures, *, python_exe, env_path, manager, entr
                 for module in get_toplevel_imports(dist):
                     providers.setdefault(normalize_name(module), set()).add(provider_name)
     targets = {"conda": set(), "pip": set()}
+    upgrade_consumers = set()
     causes = set()
     for failure in failures:
         if _should_skip_failure(failure):
             continue
         cause, metadata = _import_failure_cause(failure.get("error"))
-        if not cause or cause in {"imp", "fcntl", "pkg_resources"}:
+        if cause == "pkg_resources":
+            dist = failure.get("dist_path")
+            name = _read_metadata_name(dist) if isinstance(dist, Path) else None
+            entry = by_name.get(normalize_name(name or "")) or {}
+            if name and normalize_name(name) != "setuptools" and manager and entry and "pypi" not in (entry.get("channel") or "").lower():
+                upgrade_consumers.add(entry.get("name") or name)
+                causes.add(normalize_name(cause))
+            continue
+        if cause == "qt-bindings":
+            selected = os.environ.get("QT_API", "").lower()
+            bindings = []
+            for entry in by_name.values():
+                name = entry.get("name") or ""
+                key = normalize_name(name)
+                api = {"pyside2": "pyside2", "pyside6": "pyside6", "pyqt6": "pyqt6", "pyqt5": "pyqt5"}.get(key)
+                if key == "pyqt":
+                    api = "pyqt6" if str(entry.get("version") or "").startswith("6.") else "pyqt5"
+                if api and (not selected or selected == api) and "pypi" not in (entry.get("channel") or "").lower():
+                    bindings.append(name)
+            bindings = sorted(set(bindings))
+            if manager and len(bindings) == 1:
+                targets["conda"].add(bindings[0])
+                causes.add(cause)
+            continue
+        if not cause or cause in {"imp", "fcntl"}:
             continue
         cause_key = normalize_name(cause)
         names = {cause} if metadata else providers.get(cause_key, {cause})
@@ -650,11 +680,15 @@ def _repair_import_dependencies(failures, *, python_exe, env_path, manager, entr
             targets["conda"].add(fallback)
         causes.add(cause_key)
     actions = []
+    if upgrade_consumers:
+        packages = sorted(upgrade_consumers)
+        ok = conda_upgrade_dependencies(env_path, packages, manager, channels)
+        actions.append({"action": "legacy_consumer_upgrade", "packages": packages, "ok": ok})
     for kind, packages in targets.items():
         if not packages:
             continue
         packages = sorted(packages)
-        print(f"\nPriority: repairing {kind} dependency targets: {', '.join(packages)}")
+        print(tr('\nPriority: repairing {value0} dependency targets: {value1}', value0=kind, value1=', '.join(packages)))
         if kind == "conda":
             ok = conda_install(env_path, packages, manager, channels, ignore_pinned=False, force_reinstall=True)
             if ok and any(normalize_name(name) == "charset-normalizer" for name in packages):
@@ -927,7 +961,7 @@ def _cleanup_jedi_common_pkg_dir(python_exe):
         return False
 
 
-def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, use_uv=False):
+def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, use_uv=False, remove_unfixable=False, interactive_removal=True, interactive_qt=True):
     if not failures:
         return {"ok": True, "actions": []}
 
@@ -974,6 +1008,15 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             return {"ok": True, "plan": [], "actions": dependency_actions}
 
 
+    failures, qt_actions = repair_qt_bindings(
+        failures, python_exe=python_exe, env_path=env_path, manager=manager,
+        channels=configured_channels, in_conda_env=is_conda, check_import=check_import,
+        interactive=interactive_qt and os.environ.get("ENV_REPAIR_REVERIFY") != "1", use_uv=use_uv,
+    )
+    dependency_actions.extend(qt_actions)
+    if not failures:
+        return {"ok": True, "plan": [], "actions": dependency_actions}
+
     by_dist = {}
     for f in failures:
         dist_info = f.get("dist_path")
@@ -984,11 +1027,29 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
     actions = list(dependency_actions)
     for dist_info, f in sorted(by_dist.items(), key=lambda kv: str(kv[0]).lower()):
         failed_import = f.get("import")
+        if f.get("removed"):
+            plan.append({"dist": dist_info.name, "kind": "removed", "name": None,
+                         "import": failed_import, "reason": "Qt consumer removal explicitly confirmed and completed"})
+            continue
         missing_mod = _extract_missing_module_name(f.get("error"))
         if _should_skip_failure(f):
             plan.append({"dist": dist_info.name, "kind": "skip", "name": None, "import": failed_import, "reason": "platform/expected"})
             continue
         kind, name = _classify_dist(dist_info, conda_entries_by_name=conda_entries_by_name)
+        cause, _ = _import_failure_cause(f.get("error"))
+        if cause in {"pkg_resources", "qt-bindings"}:
+            reason = (
+                "legacy consumer requires pkg_resources (removed from setuptools 82+); "
+                "upgrade/migrate the consumer; no automatic setuptools downgrade or pip overlay"
+                if cause == "pkg_resources" else
+                "Qt backend unavailable; repair the selected installed PyQt/PySide binding or choose a compatible binding; "
+                f"QT_API={os.environ.get('QT_API') or '<auto>'}; do not reinstall Qt consumers"
+            )
+            plan.append({"dist": dist_info.name, "kind": "defer", "name": None,
+                         "import": failed_import, "reason": reason,
+                         "unfixable": cause, "consumer": name, "installer": kind,
+                         "import_error": f.get("error"), "dist_path": str(dist_info)})
+            continue
         legacy = _legacy_unmaintained_meta(name)
         if legacy:
             plan.append({"dist": dist_info.name, "kind": "skip", "name": None,
@@ -1290,53 +1351,6 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             )
             continue
 
-        # setuptools/pkg_resources on modern Python:
-        # If `pkg_resources` is missing, this is almost always a broken setuptools install.
-        # In that case, the *correct* fix is to relink/reinstall setuptools via conda.
-        #
-        # Historically we skipped this to avoid pip/conda thrash loops, but in real-world envs
-        # (notably Anaconda base) this can leave a large dependency chain broken (clyent,
-        # anaconda-client, etc.).
-        if (
-            kind == "conda"
-            and name
-            and normalize_name(name) == "setuptools"
-            and normalize_name(missing_mod or "") == normalize_name("pkg_resources")
-        ):
-            # Newer conda-forge setuptools builds may not ship `pkg_resources` anymore.
-            # When packages still depend on it, the least-bad pragmatic fix is to install setuptools
-            # via pip into the conda env (restoring pkg_resources).
-            if python_exe:
-                plan.append(
-                    {
-                        "dist": dist_info.name,
-                        "kind": "pip",
-                        "name": "setuptools",
-                        "import": failed_import,
-                        "reason": "pkg_resources missing; install setuptools via pip to restore pkg_resources",
-                    }
-                )
-            elif manager:
-                plan.append(
-                    {
-                        "dist": dist_info.name,
-                        "kind": "conda",
-                        "name": "setuptools",
-                        "import": failed_import,
-                        "reason": "pkg_resources missing; force-reinstall setuptools via conda (no python exe for pip)",
-                    }
-                )
-            else:
-                plan.append(
-                    {
-                        "dist": dist_info.name,
-                        "kind": "skip",
-                        "name": None,
-                        "import": failed_import,
-                        "reason": "pkg_resources missing but no installer available; skip auto-repair",
-                    }
-                )
-            continue
 
         # Handle deprecated wrappers even if defaults are disabled:
         # - if the replacement is already installed, just remove the wrapper
@@ -1488,29 +1502,34 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
 
     def _print_fix_plan(plan_items):
         items = list(plan_items or [])
+        from .recovery import successful_sandboxes
+
+        passed = {normalize_name(name) for sandbox in successful_sandboxes(actions) for name in sandbox.get("targets", [])}
+        items = [item for item in items if not (item.get("kind") == "defer" and
+                 normalize_name(item.get("dist", "").removesuffix(".dist-info").rsplit("-", 1)[0]) in passed)]
         if not items:
             return
-        print("\nFix plan:")
+        print(tr('\nFix plan:'))
         for item in items:
             kind = item.get("kind") or "?"
             name = item.get("name")
             dist = item.get("dist") or "?"
-            reason = item.get("reason")
+            reason = tr(item["reason"]) if item.get("reason") else None
             uninstall = item.get("uninstall") or {}
             remove_name = uninstall.get("name")
             remove_kind = uninstall.get("kind")
             if kind == "remove" and remove_name and remove_kind:
-                line = f"  - {dist}: remove via {remove_kind}: {remove_name}"
+                line = tr("  - {value0}: remove via {value1}: {value2}", value0=dist, value1=remove_kind, value2=remove_name)
                 if reason:
                     line += f" [{reason}]"
             else:
-                line = f"  - {dist}: {kind}"
+                line = f"  - {dist}: {tr(kind)}"
                 if name:
                     line += f" -> {name}"
                 if reason:
                     line += f" [{reason}]"
                 if remove_name and remove_kind:
-                    line += f" (then remove via {remove_kind}: {remove_name})"
+                    line += tr(" (then remove via {value0}: {value1})", value0=remove_kind, value1=remove_name)
             print(line)
 
     _print_fix_plan(plan)
@@ -1525,8 +1544,8 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             present = {normalize_name((e or {}).get("name") or "") for e in refreshed if isinstance(e, dict)}
             conda_rm_present = [p for p in explicit_conda_rm if normalize_name(p) in present]
             if conda_rm_present:
-                print(f"\nRemoving {len(conda_rm_present)} package(s) via {manager} (remove-only)...")
-                print("Conda remove targets:", ", ".join(conda_rm_present))
+                print(tr('\nRemoving {value0} package(s) via {value1} (remove-only)...', value0=len(conda_rm_present), value1=manager))
+                print(tr('Conda remove targets:'), ", ".join(conda_rm_present))
                 ok_rm = conda_remove(env_path, conda_rm_present, manager)
                 ok_all = ok_all and ok_rm
                 actions.append({"action": "conda_remove", "count": len(conda_rm_present), "ok": ok_rm, "packages": conda_rm_present})
@@ -1534,8 +1553,8 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             ok_all = False
             actions.append({"action": "error", "reason": "remove-only requested but no conda/mamba manager available"})
     if explicit_pip_rm and python_exe:
-        print(f"\nRemoving {len(explicit_pip_rm)} package(s) via pip (remove-only)...")
-        print("Pip remove targets:", ", ".join(explicit_pip_rm))
+        print(tr('\nRemoving {value0} package(s) via pip (remove-only)...', value0=len(explicit_pip_rm)))
+        print(tr('Pip remove targets:'), ", ".join(explicit_pip_rm))
         ok_rm = pip_uninstall(python_exe, explicit_pip_rm, use_uv=use_uv)
         ok_all = ok_all and ok_rm
         actions.append({"action": "pip_uninstall", "count": len(explicit_pip_rm), "ok": ok_rm, "packages": explicit_pip_rm})
@@ -1544,7 +1563,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
     for item in cleanup_items:
         if normalize_name(item.get("name") or "") != "jedi-common-dir":
             continue
-        print("\nCleaning up jedi/common shadowing (site-packages)...")
+        print(tr('\nCleaning up jedi/common shadowing (site-packages)...'))
         ok_clean = _cleanup_jedi_common_pkg_dir(python_exe)
         ok_all = ok_all and ok_clean
         actions.append({"action": "cleanup_jedi_common_dir", "ok": ok_clean})
@@ -1574,7 +1593,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
 
             merged = (out or "") + "\n" + (err or "")
             if _is_python_pin_conflict(merged):
-                print("Solver hit pinned-python conflict; retrying without --force-reinstall to allow compatible upgrades...")
+                print(tr('Solver hit pinned-python conflict; retrying without --force-reinstall to allow compatible upgrades...'))
                 ok_upgrade, out_up, err_up = conda_install_capture(
                     env_path,
                     group,
@@ -1595,7 +1614,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
                 _save_verify_imports_blacklist(blacklist)
                 remaining = [p for p in group if p not in set(offenders)]
                 if len(remaining) >= 2:
-                    print(f"Solver failed; skipping {len(offenders)} incompatible package(s): {', '.join(offenders)}")
+                    print(tr('Solver failed; skipping {value0} incompatible package(s): {value1}', value0=len(offenders), value1=', '.join(offenders)))
                     ok2, _out2, _err2 = conda_install_capture(
                         env_path,
                         remaining,
@@ -1646,8 +1665,8 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
         pkgs = sorted(set(to_relink))
         if not pkgs:
             return True
-        print(f"\nRelinking {len(pkgs)} replacement package(s) via {manager} (--force-reinstall)...")
-        print("Conda relink targets:", ", ".join(pkgs))
+        print(tr('\nRelinking {value0} replacement package(s) via {value1} (--force-reinstall)...', value0=len(pkgs), value1=manager))
+        print(tr('Conda relink targets:'), ", ".join(pkgs))
         return conda_install(env_path, pkgs, manager, configured_channels, ignore_pinned=False, force_reinstall=True)
 
     conda_items = [p for p in plan if p["kind"] == "conda" and p["name"]]
@@ -1656,7 +1675,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
         pkgs = [p["name"] for p in conda_items]
         cleanup_names = sorted({p["pip_cleanup_before_relink"] for p in conda_items if p.get("pip_cleanup_before_relink")})
         if cleanup_names:
-            print("\nRemoving pip overlays before conda relink:", ", ".join(cleanup_names))
+            print(tr('\nRemoving pip overlays before conda relink:'), ", ".join(cleanup_names))
             ok_clean = pip_uninstall(python_exe, cleanup_names, use_uv=use_uv)
             actions.append({"action": "pip_uninstall_conda_overlay", "packages": cleanup_names, "ok": ok_clean})
             # Always continue to the force-reinstall, including partial cleanup.
@@ -1665,8 +1684,8 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             if _preclean_module_roots_for_conda_package(p):
                 stubborn.append(p)
         if stubborn:
-            print(f"\nPre-cleaning stale artifacts for {len(sorted(set(stubborn)))} stubborn package(s)...")
-            print("Pre-clean targets:", ", ".join(sorted(set(stubborn))))
+            print(tr('\nPre-cleaning stale artifacts for {value0} stubborn package(s)...', value0=len(sorted(set(stubborn)))))
+            print(tr('Pre-clean targets:'), ", ".join(sorted(set(stubborn))))
             pre = _preclean_stubborn_conda_artifacts(python_exe=python_exe, conda_packages=stubborn)
             actions.append({"action": "preclean_stubborn_artifacts", "ok": bool(pre.get("ok")), "removed": pre.get("removed", 0), "packages": sorted(set(stubborn))})
 
@@ -1676,14 +1695,14 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             present = {normalize_name((e or {}).get("name") or "") for e in refreshed if isinstance(e, dict)}
             to_remove = [p for p in hard_remove if normalize_name(p) in present]
             if to_remove:
-                print(f"\nHard-remove before reinstall for {len(to_remove)} package(s)...")
-                print("Conda hard-remove targets:", ", ".join(to_remove))
+                print(tr('\nHard-remove before reinstall for {value0} package(s)...', value0=len(to_remove)))
+                print(tr('Conda hard-remove targets:'), ", ".join(to_remove))
                 ok_rm_hard = conda_remove(env_path, to_remove, manager)
                 actions.append({"action": "conda_hard_remove_before_reinstall", "ok": ok_rm_hard, "packages": to_remove})
                 ok_all = ok_all and ok_rm_hard
 
-        print(f"\nReinstalling {len(pkgs)} packages via {manager} (batched)...")
-        print("Conda targets:", ", ".join(sorted(set(pkgs))))
+        print(tr('\nReinstalling {value0} packages via {value1} (batched)...', value0=len(pkgs), value1=manager))
+        print(tr('Conda targets:'), ", ".join(sorted(set(pkgs))))
         ok, installed, failed = _install_conda_batched(pkgs)
         ok_all = ok_all and ok
         actions.append({"action": "conda_reinstall_batch", "count": len(pkgs), "ok": ok, "installed": installed, "failed": failed})
@@ -1708,7 +1727,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
                 continue
             if _failure_is_external(err_imp, imp):
                 continue
-            print(f"\nImport still fails after relinking {pkg}; cleaning local installation and reinstalling via {manager}...")
+            print(tr('\nImport still fails after relinking {value0}; cleaning local installation and reinstalling via {value1}...', value0=pkg, value1=manager))
             _print_import_error(err_imp)
             ok_clean = pip_uninstall(python_exe, [local_name], use_uv=use_uv)
             actions.append({"action": "pip_uninstall_before_conda_reinstall", "package": local_name, "ok": ok_clean})
@@ -1733,7 +1752,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
             present = {normalize_name((e or {}).get("name") or "") for e in refreshed if isinstance(e, dict)}
             conda_rm_present = [p for p in conda_rm if normalize_name(p) in present]
             if conda_rm_present:
-                print(f"\nRemoving {len(conda_rm_present)} deprecated wrapper package(s) via {manager}...")
+                print(tr('\nRemoving {value0} deprecated wrapper package(s) via {value1}...', value0=len(conda_rm_present), value1=manager))
                 ok_rm = conda_remove(env_path, conda_rm_present, manager)
                 ok_all = ok_all and ok_rm
                 actions.append({"action": "conda_remove", "count": len(conda_rm_present), "ok": ok_rm, "packages": conda_rm_present})
@@ -1742,7 +1761,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
                     ok_all = ok_all and ok_relink
                     actions.append({"action": "conda_relink", "ok": ok_relink})
         if pip_rm and python_exe:
-            print(f"\nRemoving {len(pip_rm)} deprecated wrapper package(s) via pip...")
+            print(tr('\nRemoving {value0} deprecated wrapper package(s) via pip...', value0=len(pip_rm)))
             ok_rm = pip_uninstall(python_exe, pip_rm, use_uv=use_uv)
             ok_all = ok_all and ok_rm
             actions.append({"action": "pip_uninstall", "count": len(pip_rm), "ok": ok_rm, "packages": pip_rm})
@@ -1754,7 +1773,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
         present = {normalize_name((e or {}).get("name") or "") for e in refreshed if isinstance(e, dict)}
         conda_rm_present = [p for p in conda_rm if normalize_name(p) in present]
         if conda_rm_present:
-            print(f"\nRemoving {len(conda_rm_present)} deprecated wrapper package(s) via {manager}...")
+            print(tr('\nRemoving {value0} deprecated wrapper package(s) via {value1}...', value0=len(conda_rm_present), value1=manager))
             ok_rm = conda_remove(env_path, conda_rm_present, manager)
             ok_all = ok_all and ok_rm
             actions.append({"action": "conda_remove", "count": len(conda_rm_present), "ok": ok_rm, "packages": conda_rm_present})
@@ -1763,7 +1782,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
                 ok_all = ok_all and ok_relink
                 actions.append({"action": "conda_relink", "ok": ok_relink})
     if pip_rm and python_exe:
-        print(f"\nRemoving {len(pip_rm)} deprecated wrapper package(s) via pip...")
+        print(tr('\nRemoving {value0} deprecated wrapper package(s) via pip...', value0=len(pip_rm)))
         ok_rm = pip_uninstall(python_exe, pip_rm, use_uv=use_uv)
         ok_all = ok_all and ok_rm
         actions.append({"action": "pip_uninstall", "count": len(pip_rm), "ok": ok_rm, "packages": pip_rm})
@@ -1774,18 +1793,18 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
         add = [p for p in conda_failed_for_pip if normalize_name(p.get("name") or "") not in existing]
         if add:
             print(
-                f"\nConda fallback: trying pip for {len(add)} package(s) that failed in defaults-disabled mode..."
+                tr('\nConda fallback: trying pip for {value0} package(s) that failed in defaults-disabled mode...', value0=len(add))
             )
-            print("Pip fallback targets:", ", ".join(sorted(set(p["name"] for p in add if p.get("name")))))
+            print(tr('Pip fallback targets:'), ", ".join(sorted(set(p["name"] for p in add if p.get("name")))))
             pip_items.extend(add)
     if pip_items:
         no_deps = bool(is_conda)
-        why = " (no-deps in conda env)" if no_deps else ""
+        why = tr(" (no-deps in conda env)") if no_deps else ""
         only_binary = os.name == "nt"
         ignore_installed = bool(is_conda)
-        extra = (why + (", wheels-only" if only_binary else "")) if (why or only_binary) else ""
-        print(f"\nReinstalling {len(pip_items)} packages via pip{extra}...")
-        print("Pip targets:", ", ".join(sorted(set(p['name'] for p in pip_items if p.get('name')))))
+        extra = (why + (tr(", wheels-only") if only_binary else "")) if (why or only_binary) else ""
+        print(tr('\nReinstalling {value0} packages via pip{value1}...', value0=len(pip_items), value1=extra))
+        print(tr('Pip targets:'), ", ".join(sorted(set(p['name'] for p in pip_items if p.get('name')))))
         for item in pip_items:
             pkg = item["name"]
             imp = item.get("import")
@@ -1816,7 +1835,7 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
                 ok_imp, err_imp = check_import(imp, python_exe)
                 actions.append({"action": "pip_recheck_import", "package": pkg, "import": imp, "ok": ok_imp})
                 if not ok_imp:
-                    print(f"    ! Import still fails after reinstall; keeping installed package: {pkg}")
+                    print(tr('    ! Import still fails after reinstall; keeping installed package: {value0}', value0=pkg))
                     _print_import_error(err_imp)
                     ok_all = False
                     actions.append(
@@ -1828,6 +1847,45 @@ def attempt_fix(failures, python_exe, env_path, manager, *, base_prefix, debug, 
                             "ok": False,
                         }
                     )
+
+    candidates = []
+    for item in plan:
+        if item.get("unfixable") != "pkg_resources" or item.get("installer") not in {"conda", "pip"}:
+            continue
+        if normalize_name(item.get("consumer") or "") in CRITICAL_PIP_PACKAGES:
+            continue
+        traceback_files = re.findall(r'File ["\']([^"\']+)["\']', str(item.get("import_error") or ""))
+        if traceback_files:
+            last_file = traceback_files[-1].replace("\\", "/")
+            root = item.get("import") or ""
+            if f"/{root}/" not in last_file and not last_file.endswith(f"/{root}.py"):
+                continue
+        candidates.append({"package": item["consumer"], "installer": item["installer"],
+                           "error": item["import_error"], "dist_path": item["dist_path"]})
+    if candidates:
+        removed, removal_actions = remove_unfixable_consumers(
+            candidates, env_path=env_path, python_exe=python_exe, manager=manager,
+            force=remove_unfixable, interactive=interactive_removal, use_uv=use_uv,
+            allow_dependents=False,
+        )
+        actions.extend(removal_actions)
+        for item in plan:
+            consumer = item.get("consumer")
+            if consumer and normalize_name(consumer) in removed:
+                item["kind"] = "removed"
+        for failure in failures:
+            dist_info = failure.get("dist_path")
+            if not isinstance(dist_info, Path):
+                continue
+            _kind, name = _classify_dist(dist_info, conda_entries_by_name=conda_entries_by_name)
+            if normalize_name(name or "") in removed:
+                for item in plan:
+                    if item.get("dist") == dist_info.name:
+                        item["kind"] = "removed"
+        if removed:
+            ok_all = not any(item.get("kind") == "defer" for item in plan) and all(
+                action.get("ok", True) for action in actions if action.get("action") not in {"legacy_consumer_upgrade"}
+            )
 
     skipped = [p for p in plan if p["kind"] == "skip"]
     for item in skipped:
@@ -1884,7 +1942,9 @@ def parse_record_file(record_path):
             # File in root (e.g. 'six.py')
             lower = path.lower()
             if lower.endswith(import_like_suffixes):
-                top_levels.add(Path(path).stem)
+                stem = path.split(".", 1)[0] if lower.endswith((".pyd", ".so", ".dylib")) else Path(path).stem
+                if stem.isidentifier():
+                    top_levels.add(stem)
                 
     return sorted(top_levels)
 
@@ -1937,7 +1997,7 @@ def _retry_import_timeouts(results, *, python_exe, env_path, manager, base_prefi
     for result in results:
         if not result.get("ok") and _is_import_timeout_error(result.get("error")):
             if not quiet:
-                print(f"Retrying timed-out import sequentially (90s): {result['import']}")
+                print(tr('Retrying timed-out import sequentially (90s): {value0}', value0=result['import']))
             ok, error = check_import(result["import"], python_exe, timeout=90)
             result = dict(result, ok=ok, error=error)
             actions.append({"action": "timeout_retry", "import": result["import"], "ok": ok, "error": error})
@@ -2030,28 +2090,28 @@ def verify_imports(args):
 
     if not args.json:
         # Make it explicit which env we are checking (helps diagnose user confusion).
-        print(f"Env: {env_path}")
-        print(f"Python: {python_exe}")
+        print(tr('Env: {value0}', value0=env_path))
+        print(tr('Python: {value0}', value0=python_exe))
         if getattr(args, "debug", False):
             print("Site-packages:")
             for p in site_pkgs:
                 print(f"  - {p}")
-        print(f"Distributions: {dist_info_dirs} (*.dist-info)")
-        print(f"Import targets: {len(to_check)}")
+        print(tr('Distributions: {value0} (*.dist-info)', value0=dist_info_dirs))
+        print(tr('Import targets: {value0}', value0=len(to_check)))
     
     if not to_check:
          # Fallback: if no critical packages found in lazy mode, warn user or check a few random ones?
          # Or just return empty report.
         if not getattr(args, "full", False):
             # Avoid requiring a translation entry for this experimental path.
-            print("No import candidates found in lazy mode.")
+            print(tr('No import candidates found in lazy mode.'))
         return {"ok": True, "exit_code": 0, "report": {"env": env_path, "checks": 0, "failures": []}}
 
     # Parallel execution
     max_workers = min(32, (os.cpu_count() or 1) * 4) 
-    print(f"Verifying {len(to_check)} imports using {max_workers} threads...")
+    print(tr('Verifying {value0} imports using {value1} threads...', value0=len(to_check), value1=max_workers))
     
-    progress = Progress(total=len(to_check), label="Verifying imports")
+    progress = Progress(total=len(to_check), label=tr("Verifying imports"))
     try:
         results = _run_import_checks_parallel(
             to_check=to_check,
@@ -2061,7 +2121,7 @@ def verify_imports(args):
         )
     except KeyboardInterrupt:
         # Avoid ugly interpreter shutdown noise if user interrupts mid-flight.
-        print("\nInterrupted verify-imports; waiting for running checks to stop...", file=sys.stderr)
+        print(tr('\nInterrupted verify-imports; waiting for running checks to stop...'), file=sys.stderr)
         raise
 
     initial_timeouts = [r for r in results if (not r["ok"]) and _is_import_timeout_error(r.get("error"))]
@@ -2075,21 +2135,21 @@ def verify_imports(args):
     failures = [r for r in results if (not r["ok"]) and not _is_import_timeout_error(r.get("error"))]
 
     if not args.json:
-        print("\nImport Verification Report:")
-        print(f"Checked {len(to_check)} imports in {env_path}\n")
+        print(tr('\nImport Verification Report:'))
+        print(tr('Checked {value0} imports in {value1}\n', value0=len(to_check), value1=env_path))
         if not failures and not timeout_results:
-            print("All checked imports succeeded!")
+            print(tr('All checked imports succeeded!'))
         else:
             if failures:
-                print(f"Found {len(failures)} broken imports:\n")
+                print(tr('Found {value0} broken imports:\n', value0=len(failures)))
                 for f in failures:
-                    print(f"  [FAIL] {f['import']} (from {f['dist']})")
+                    print(tr('  [FAIL] {value0} (from {value1})', value0=f['import'], value1=f['dist']))
                     if f.get("error"):
                         _print_import_error(f["error"])
             if timeout_results:
-                print(f"\nIncomplete verification: {len(timeout_results)} import timeout(s) remain unresolved:")
+                print(tr('\nIncomplete verification: {value0} import timeout(s) remain unresolved:', value0=len(timeout_results)))
                 for t in timeout_results[:12]:
-                    print(f"  [TIMEOUT] {t['import']} (from {t['dist']})")
+                    print(tr('  [TIMEOUT] {value0} (from {value1})', value0=t['import'], value1=t['dist']))
 
     fix_report = None
     if getattr(args, "fix", False) and failures:
@@ -2101,6 +2161,9 @@ def verify_imports(args):
             base_prefix=base_prefix,
             debug=show_json_output,
             use_uv=getattr(args, "use_uv", False),
+            remove_unfixable=bool(getattr(args, "remove_unfixable", False)),
+            interactive_removal=not bool(args.json),
+            interactive_qt=not bool(args.json),
         )
 
     post_failures = []
@@ -2111,7 +2174,7 @@ def verify_imports(args):
             dist = f.get("dist")
             imp = f.get("import")
             p = plan_by_dist.get(dist) if dist else None
-            if p and p.get("kind") in ("skip", "remove"):
+            if p and p.get("kind") in ("skip", "remove", "removed"):
                 continue
             if not imp or not isinstance(imp, str) or not imp.isidentifier():
                 post_failures.append(
@@ -2121,13 +2184,15 @@ def verify_imports(args):
             ok, err = check_import(imp, python_exe)
             if not ok:
                 post_failures.append({"dist": dist, "import": imp, "error": err})
-        if not args.json:
+        from .recovery import successful_sandboxes
+
+        if not args.json and not successful_sandboxes(fix_report.get("actions")):
             if post_failures:
-                print(f"\nPost-fix: {len(post_failures)} import(s) still failing.")
+                print(tr('\nPost-fix: {value0} import(s) still failing.', value0=len(post_failures)))
                 for pf in post_failures[:12]:
                     dist = pf.get("dist") or "?"
                     imp = pf.get("import") or "?"
-                    print(f"  [FAIL] {imp} (from {dist})")
+                    print(tr('  [FAIL] {value0} (from {value1})', value0=imp, value1=dist))
                     _print_import_error(pf.get("error"))
                 # Last-chance fallback for stubborn imports in mixed envs:
                 # try pip wheel reinstall for known problematic packages.
@@ -2140,8 +2205,8 @@ def verify_imports(args):
                     }
                 )
                 if fallback_targets:
-                    print("\nFallback: repairing stubborn imports via pip wheel reinstall...")
-                    print("Pip fallback targets:", ", ".join(fallback_targets))
+                    print(tr('\nFallback: repairing stubborn imports via pip wheel reinstall...'))
+                    print(tr('Pip fallback targets:'), ", ".join(fallback_targets))
                     fallback_actions = []
                     for pkg in fallback_targets:
                         ok_fb = pip_reinstall(
@@ -2171,23 +2236,92 @@ def verify_imports(args):
                             still.append({"dist": pf.get("dist"), "import": imp, "error": err_imp})
                     post_failures = still
                     if post_failures:
-                        print(f"\nPost-fallback: {len(post_failures)} import(s) still failing.")
+                        print(tr('\nPost-fallback: {value0} import(s) still failing.', value0=len(post_failures)))
                         for pf in post_failures[:12]:
                             dist = pf.get("dist") or "?"
                             imp = pf.get("import") or "?"
-                            print(f"  [FAIL] {imp} (from {dist})")
+                            print(tr('  [FAIL] {value0} (from {value1})', value0=imp, value1=dist))
                             _print_import_error(pf.get("error"))
                     else:
-                        print("\nPost-fallback: all remaining imports OK.")
+                        print(tr('\nPost-fallback: all remaining imports OK.'))
             else:
                 if timeout_results:
-                    print("\nPost-fix: no remaining non-skipped import errors; verification remains incomplete due to timeouts.")
+                    print(tr('\nPost-fix: no remaining non-skipped import errors; verification remains incomplete due to timeouts.'))
                 else:
-                    print("\nPost-fix: all non-skipped imports OK.")
+                    print(tr('\nPost-fix: all non-skipped imports OK.'))
     else:
         post_failures = [
             {"dist": f.get("dist"), "import": f.get("import"), "error": f.get("error")} for f in failures
         ]
+
+    if fix_report is not None and post_failures:
+        from .package_sandbox import recover_import_failures
+
+        original_by_dist = {failure.get("dist"): failure for failure in failures}
+        unresolved = [dict(failure, dist_path=original_by_dist.get(failure.get("dist"), {}).get("dist_path"))
+                      for failure in post_failures]
+        reverify = os.environ.get("ENV_REPAIR_REVERIFY") == "1"
+        recovery = {"action": "automatic_package_sandbox", "reason": "no recursive migration during final verification", "ok": False}
+        if not reverify:
+            recovery = recover_import_failures(
+                unresolved, env_path=env_path, python_exe=python_exe, manager=manager,
+                channels=load_conda_channels(base_prefix=base_prefix, has_conda=which("conda"),
+                                             has_mamba=which("mamba"), show_json_output=False),
+                python_version=_python_major_minor(python_exe), actions=fix_report.get("actions") or [], quiet=bool(args.json),
+            )
+        fix_report.setdefault("actions", []).append(recovery)
+
+        from .recovery import offer_installation, successful_sandboxes
+
+        successes = [] if reverify else successful_sandboxes(fix_report["actions"])
+        options = getattr(args, "recovery_options", None)
+        if options is None:
+            options = dict(vars(args), cmd="one-shot", critical_only=not bool(getattr(args, "full", False)))
+        for sandbox in successes:
+            offer = offer_installation(sandbox, options=options, interactive=not bool(args.json))
+            fix_report["actions"].append(offer)
+            if offer.get("approved"):
+                return {"ok": False, "exit_code": 1, "pending_installation": offer["plan_path"],
+                        "report": {"env": env_path, "python": python_exe, "fix": fix_report, "post_failures": post_failures}}
+
+        if getattr(args, "remove_unfixable", False) or (not args.json and sys.stdin.isatty()):
+            candidates = []
+            for failure in unresolved:
+                dist = failure.get("dist_path")
+                if not isinstance(dist, Path) or not dist.exists():
+                    continue
+                name = _read_metadata_name(dist)
+                if not name:
+                    continue
+                try:
+                    from .package_sandbox import _inventory
+
+                    inventory = _inventory(env_path, python_exe, targets=[name])
+                    package = inventory["packages"][0]
+                    kind = "conda" if package["kind"] == "conda" else "pip"
+                    provider = name
+                    if kind == "conda":
+                        metadata_path = (dist / "METADATA").resolve()
+                        provider = next(record["name"] for record in inventory["records"]
+                                        if any((Path(env_path) / filename).resolve() == metadata_path for filename in record.get("files", [])))
+                    candidates.append({"package": provider, "distribution": name, "installer": kind,
+                                       "dist_path": str(dist), "error": failure.get("error")})
+                except (OSError, ValueError, StopIteration) as exc:
+                    fix_report["actions"].append({"action": "unfixable_removal_skipped", "dist": dist.name, "reason": str(exc)})
+                    continue
+            if candidates:
+                removed, removal_actions = remove_unfixable_consumers(
+                    candidates, env_path=env_path, python_exe=python_exe, manager=manager,
+                    force=bool(getattr(args, "remove_unfixable", False)), interactive=not bool(args.json),
+                    use_uv=bool(getattr(args, "use_uv", False)), allow_dependents=False,
+                )
+                fix_report["actions"].extend(removal_actions)
+                removed_dists = {Path(item["dist_path"]).name for item in candidates if normalize_name(item["package"]) in removed}
+                for dist in removed_dists:
+                    fix_report.setdefault("plan", []).append({"dist": dist, "kind": "removed", "reason": "unfixable package safely removed with explicit permission"})
+                post_failures = [failure for failure in post_failures if failure.get("dist") not in removed_dists]
+                if removed_dists and not post_failures:
+                    fix_report["ok"] = True
 
     ok_all = len(post_failures) == 0 and not timeout_results and (fix_report is None or bool(fix_report.get("ok")))
 

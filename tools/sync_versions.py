@@ -78,6 +78,28 @@ def _replace_context_var(text: str, *, var: str, value: str) -> str:
     return pattern.sub(lambda match: f'{match.group(1)} "{value}"', text, count=1)
 
 
+def _replace_sha256(text: str, sha256: str) -> str:
+    updated, count = re.subn(r"(?m)^(\s*sha256:\s*)[0-9a-f]{64}([ \t]*)$",
+                             lambda match: f"{match.group(1)}{sha256}{match.group(2)}", text, count=1)
+    if not count:
+        raise RuntimeError("Could not find recipe sha256")
+    return updated
+
+
+def _sync_feedstock(text: str, *, version: str, sha256: str) -> str:
+    previous = re.search(r'(?m)^  version:\s*[\"\']?([^\s\"\']+)', text)
+    if not previous:
+        raise RuntimeError("Could not find feedstock context version")
+    updated = _replace_context_var(text, var="version", value=version)
+    updated = _replace_sha256(updated, sha256)
+    if previous.group(1) != version:
+        updated, count = re.subn(r"(?m)^(  number:)[ \t]*\d+([ \t]*(?:#.*)?)$",
+                                lambda match: f"{match.group(1)} 0{match.group(2)}", updated, count=1)
+        if not count:
+            raise RuntimeError("Could not find literal feedstock build number")
+    return updated
+
+
 def _build_sdist(*, python_exe: str) -> Optional[Path]:
     # Uses `python -m build --sdist` if available. No network needed.
     dist_dir = ROOT / "dist"
@@ -102,7 +124,8 @@ def main(argv=None) -> int:
         action="store_true",
         help="Download the exact PyPI sdist for the current version and hash it (recommended for conda-forge).",
     )
-    ap.add_argument(
+    targets = ap.add_mutually_exclusive_group()
+    targets.add_argument(
         "--staged-recipes",
         help=(
             "Path to a conda-forge/staged-recipes checkout. "
@@ -110,6 +133,7 @@ def main(argv=None) -> int:
             "staged-recipes/recipes/env-repair/recipe.yaml after syncing."
         ),
     )
+    targets.add_argument("--feedstock", help="Path to an existing env-repair-feedstock checkout; update recipe/recipe.yaml in place without replacing feedstock-specific settings.")
     args = ap.parse_args(argv)
 
     pyproject_path = ROOT / "pyproject.toml"
@@ -123,9 +147,9 @@ def main(argv=None) -> int:
     if args.pypi_sdist:
         try:
             sdist_desc, sha256 = _sha256_pypi_sdist(name=name, version=version)
-        except Exception:
-            sha256 = None
-            sdist_desc = None
+        except Exception as exc:
+            sys.stderr.write(f"Could not download PyPI sdist for {name} {version}: {exc}\nNo recipes updated. Publish to PyPI first.\n")
+            return 1
 
     if not sha256 and not sdist_path and args.build_sdist:
         sdist_path = _build_sdist(python_exe=args.python)
@@ -133,6 +157,19 @@ def main(argv=None) -> int:
     if not sha256 and sdist_path and sdist_path.exists():
         sha256 = _sha256_file(sdist_path)
         sdist_desc = str(sdist_path)
+
+    feedstock_target = None
+    feedstock_text = None
+    if args.feedstock:
+        if not sha256:
+            sys.stderr.write("Feedstock sync requires --pypi-sdist, --sdist or a successful --build-sdist. No recipes updated.\n")
+            return 1
+        feedstock_target = Path(args.feedstock).resolve() / "recipe" / "recipe.yaml"
+        try:
+            feedstock_text = _sync_feedstock(_read_text(feedstock_target), version=version, sha256=sha256)
+        except (OSError, RuntimeError) as exc:
+            sys.stderr.write(f"Cannot sync feedstock: {exc}\nNo recipes updated.\n")
+            return 1
 
     meta_local = ROOT / "conda.recipe" / "meta.yaml"
     meta_forge = ROOT / "conda.recipe" / "meta-forge.yaml"
@@ -146,14 +183,13 @@ def main(argv=None) -> int:
     meta_forge_text = _replace_context_var(meta_forge_text, var="name", value=name)
 
     if sha256:
-        # Update `sha256: ...` (first occurrence only).
-        meta_forge_text = re.sub(r"(?m)^(\s*sha256:\s*)([0-9a-f]{64})(\s*)$",
-                                 rf"\g<1>{sha256}\g<3>",
-                                 meta_forge_text,
-                                 count=1)
+        meta_forge_text = _replace_sha256(meta_forge_text, sha256)
 
     _write_text(meta_local, meta_local_text)
     _write_text(meta_forge, meta_forge_text)
+    if feedstock_target is not None:
+        _write_text(feedstock_target, feedstock_text)
+        sys.stderr.write(f"Updated feedstock recipe: {feedstock_target}\n")
 
     copied_to = None
     if args.staged_recipes:

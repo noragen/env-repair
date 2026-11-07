@@ -1,3 +1,4 @@
+from .i18n import tr
 import json
 import os
 import shutil
@@ -30,7 +31,7 @@ def _conda_info_json_capture(*, show_json_output, env=None):
     probe_env["CONDA_REPORT_ERRORS"] = "false"
     if show_json_output:
         mode = "disabled" if probe_env.get("CONDA_NO_PLUGINS") == "true" else "enabled"
-        print(f"Conda health diagnostic (plugins {mode}; not installer selection).")
+        print(tr('Conda health diagnostic (plugins {value0}; not installer selection).', value0=tr(mode)))
     try:
         rc, out, err = run_cmd_capture(cmd, env=probe_env, timeout=30)
     except subprocess.TimeoutExpired:
@@ -137,7 +138,7 @@ def conda_upgrade_dependencies(env_path, packages, manager, channels):
     if not requested or set(versions) != requested:
         return False
     specs = [f"{name}>{version}" for name, version in sorted(versions.values())]
-    print("Persistent dependency failure; requesting strictly newer versions:", ", ".join(specs))
+    print(tr('Persistent dependency failure; requesting strictly newer versions:'), ", ".join(specs))
     return conda_install(env_path, specs, manager, channels, ignore_pinned=False, force_reinstall=False)
 
 
