@@ -12,10 +12,12 @@ from env_repair import package_sandbox as qt_migration
 
 class TestQtMigration(unittest.TestCase):
     def test_windows_prefix_is_not_mistaken_for_site_packages(self):
-        root = Path("fixture").resolve()
-        site = root / "Lib/site-packages"
-        with patch.object(qt_migration, "run_cmd_capture", return_value=(0, json.dumps({"prefix": str(root), "purelib": str(site)}), "")):
-            self.assertEqual(Path(qt_migration._site_directory("python", expected_prefix=root)), site)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            site = root / "Lib/site-packages"
+            site.mkdir(parents=True)
+            with patch.object(qt_migration, "run_cmd_capture", return_value=(0, json.dumps({"prefix": str(root), "purelib": str(site)}), "")):
+                self.assertEqual(Path(qt_migration._site_directory("python", expected_prefix=root)), site)
 
     def local_package(self, root):
         source = root / "source"
