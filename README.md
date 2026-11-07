@@ -55,6 +55,26 @@ It steps in **after things already went wrong**.
 - `conda` is optional: mamba-only installs (e.g. Mambaforge/Miniforge variants) are supported.
 - Python available in the target environment.
 
+### Planning without repair
+
+For commands exposing `--plan`, planning returns before approval or mutation,
+including when combined with `--json`, `-y` or auto-yes. The JSON report contains
+`planned: true`; it is a static description, not a solver-validated transaction.
+Environment/revision discovery can still invoke metadata queries. No rescue
+snapshots, cache cleanup, installations or rebuild destinations are created.
+
+```cmd
+env-repair one-shot --env myenv --plan --json
+env-repair fix-inconsistent --env myenv --plan --json
+env-repair rebuild --env myenv --to newenv --plan --json
+env-repair rollback --env myenv --to prev --plan --json
+env-repair cache-fix --plan --json
+```
+
+This guarantee applies to the corrected code; older releases may not contain it.
+The separate rollback `--dry-run` option is not equivalent to `--plan`: its flow
+can still create snapshot files after approval.
+
 ### Output language
 
 env-repair's own prompts, help, progress and repair messages support English and

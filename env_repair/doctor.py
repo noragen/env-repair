@@ -378,7 +378,8 @@ def rollback(args):
     if getattr(args, "plan", False):
         if not args.json:
             print(t("plan_only", lang=lang))
-        return {"ok": True, "exit_code": 0, "planned": True}
+        return {"ok": True, "exit_code": 0, "planned": True,
+                "report": {"planned": True, "action": "rollback", "env": env_path, "from": current, "to": target}}
 
     if not _approve(yes=bool(args.yes), plan=False, prompt=t("prompt_approve", lang=lang), lang=lang):
         if not args.json:
@@ -447,9 +448,11 @@ def rebuild(args):
 
     if not args.json:
         print(t("rebuild_plan", lang=lang, src=src, dst=str(dst)))
-        if getattr(args, "plan", False):
+    if getattr(args, "plan", False):
+        if not args.json:
             print(t("plan_only", lang=lang))
-            return {"ok": True, "exit_code": 0, "planned": True}
+        return {"ok": True, "exit_code": 0, "planned": True,
+                "report": {"planned": True, "action": "rebuild", "source": src, "to": str(dst)}}
 
     if not _approve(yes=bool(args.yes), plan=False, prompt=t("prompt_approve", lang=lang), lang=lang):
         if not args.json:
@@ -573,9 +576,11 @@ def fix_inconsistent(args):
     level = args.level
     if not args.json:
         print(t("inconsistent_fix_plan", lang=lang, level=level, env=env_path))
-        if getattr(args, "plan", False):
+    if getattr(args, "plan", False):
+        if not args.json:
             print(t("plan_only", lang=lang))
-            return {"ok": True, "exit_code": 0, "planned": True}
+        return {"ok": True, "exit_code": 0, "planned": True,
+                "report": {"planned": True, "action": "fix-inconsistent", "env": env_path, "level": level}}
 
     if not _approve(yes=bool(args.yes), plan=False, prompt=t("prompt_approve", lang=lang), lang=lang):
         if not args.json:
@@ -652,9 +657,11 @@ def cache_fix(args):
 
     if not args.json:
         print(t("cache_fix_plan", lang=lang, level=level))
-        if getattr(args, "plan", False):
+    if getattr(args, "plan", False):
+        if not args.json:
             print(t("plan_only", lang=lang))
-            return {"ok": True, "exit_code": 0, "planned": True}
+        return {"ok": True, "exit_code": 0, "planned": True,
+                "report": {"planned": True, "action": "cache-fix", "level": level, "steps": steps}}
 
     if not _approve(yes=bool(args.yes), plan=False, prompt=t("prompt_approve", lang=lang), lang=lang):
         if not args.json:

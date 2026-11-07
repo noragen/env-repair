@@ -1,7 +1,8 @@
 # Changelog (env-repair)
 
-## Unreleased
+## 0.2.9 - 2026-11-08
 
+- Make rebuild, fix-inconsistent and cache-fix honor `--plan` independently of `--json`, `-y` and auto-yes. Return structured JSON plan reports (also for rollback) without approval, snapshots, cache cleanup or package operations. Add coverage for all five plan-capable subcommands, repair levels, auto-yes and explicit approval.
 - Isolate DLLs in the opt-in conda/mamba history integration test using `--copy` for creation and installation. Check that Windows DLLs do not share cache/base hardlink identities and assert complete owned-workspace cleanup instead of ignoring locked `.conda_trash` leftovers.
 - Keep migration intent separate from tested dependency locks: install only Python/target requirements, check the projected conda state against exact tested versions/builds before approval and execution, and verify the installed state before the original one-shot. Reject differing combinations and legacy full-lock plans without modifying existing history or bypassing pins. Add opt-in isolated conda/mamba history regression coverage.
 - Document the manually verified Narwhals/Altair, PySide6 and PyQt6 recovery paths, final-result checks and historical exact-spec issue in `docs/validation.md`; install/update wrapping remains deferred.
@@ -22,11 +23,11 @@
 - Distinguish stale metadata in an old site-packages layout from a real pip overlay when the current conda-owned metadata is checksum-verified. Quarantine only the stale dist-info after revalidation, preventing repeated pip-uninstall/relink loops such as PyArrow 23 residue alongside PyArrow 26.
 - Show immediate Qt solver progress and readable solver messages instead of raw JSON/internal C++ locations; retain structured diagnostics in JSON reports. Localize remaining CLI/help, repair/import, Qt, sandbox and removal messages in English/German, preserving external diagnostics and machine fields. Use modern locale detection compatible with Python versions without getdefaultlocale.
 
-- Automatically run the minimal package sandbox for unresolved imports after normal `one-shot`/`verify-imports --fix` repairs, without requiring a separate command or flag. Bound Python-version trials, retain diagnostics, avoid repeated tests and implicit Qt-backend choices, and keep original failures/exit status unchanged until genuinely repaired. Never mutate the original through this fallback.
+- Automatically run the minimal package sandbox for unresolved imports after normal `one-shot`/`verify-imports --fix` repairs, without requiring a separate command or flag. Bound Python-version trials, retain diagnostics, avoid repeated tests and implicit Qt-backend choices, and keep original failures/exit status unchanged until genuinely repaired. Sandbox testing does not modify the original; applying a successful combination requires a separately solved and explicitly approved original-environment transaction.
 
-- Add a general `sandbox` command/API for selected conda/PyPI/local targets and their necessary dependencies, optionally with another Python version. Do not clone the original package set or carry over unrelated packages/local builds/prefix pins. Require binary PyPI wheels, guarded local copies, pip dependency checks and isolated imports of installed sandbox dependencies. Preserve stage output and diagnostic error categories. Qt recovery uses this shared API rather than solving a downgrade of the full original first. Target-only success never authorizes original-environment migration or counts original errors as repaired; exclude env-repair and never automatically remove/rebuild local packages.
+- Add a general `sandbox` command/API for selected conda/PyPI/local targets and their necessary dependencies, optionally with another Python version. Do not clone the original package set or carry over unrelated packages/local builds/prefix pins. Require binary PyPI wheels, guarded local copies, pip dependency checks and isolated imports of installed sandbox dependencies. Preserve stage output and diagnostic error categories. Qt recovery uses this shared API rather than solving a downgrade of the full original first. Target-only success does not by itself authorize original-environment migration or count original errors as repaired; exclude env-repair and never automatically remove/rebuild local packages.
 
-- Offer explicit recovery choices after an unsolvable Qt-binding installation: keep unchanged, preview and separately confirm removal of the identified conda Qt consumers, or prepare a dry-run-validated lower-Python migration command. General -y/-f never select these choices; Python migration is handed off rather than replacing the running interpreter.
+- Offer explicit recovery choices after an unsolvable Qt-binding installation: keep unchanged, preview and separately confirm removal of the identified conda Qt consumers, or test a lower-Python target combination in a minimal sandbox. Applying that combination requires a separate original-environment transaction preview and confirmation. General -y/-f never select these choices; a supervised independent installer handles approved Python changes and the caller waits through verification and cleanup.
 
 - Correct the Qt6 conda-provider mapping to `pyqt6` instead of requesting the nonexistent conda-forge `pyqt>=6,<7`; keep PyQt5 and PyQt6 provider choices distinct.
 
@@ -34,7 +35,7 @@
 - Preview conda Qt installs with pins active, block Python-version changes and unreplaced package removals, use target-environment binary wheels for venvs, and recheck all affected imports after installation.
 
 - Add dedicated removal consent for unresolved `pkg_resources` consumers after repair: interactive default-no confirmation or explicit `-f`/`--remove-unfixable` authorization in one-shot and verify-imports fix mode. General `-y` and auto-yes do not authorize removal.
-- Preview conda cascading removals with package names/versions, block protected runtime/manager removals and invalid previews, refuse pip removals that leave dependents behind, and keep declined/failed removals unresolved. Qt consumers are not candidates for this policy.
+- Preview conda cascading removals with package names/versions, block protected runtime/manager removals and invalid previews, refuse pip removals that leave dependents behind, and keep declined/failed removals unresolved. General leaf-package removal does not authorize cascading Qt-consumer removal; the dedicated Qt recovery choice still needs separate confirmation.
 
 - Detect dist-info directories with missing/empty METADATA, which can crash pip inspect on newer Python. Quarantine only the damaged metadata with recovery paths, preserve package code, and batch force-relink known conda owners; do not guess pip reinstalls for orphaned metadata.
 
@@ -43,6 +44,11 @@
 
 - Add `tools/sync_versions.py --feedstock` for updates to the existing conda-forge feedstock, preserving its requirements and configuration while updating version/hash and resetting the build number only for a new version. Retain the legacy staged-recipes target.
 - Abort on requested PyPI download failure without reusing a stale checksum or updating recipes; document PyPI-first publication and bot/manual feedstock update paths.
+
+### Validation
+- 314 project tests pass locally; one opt-in package-manager integration test is skipped in the ordinary suite.
+- The isolated manager history test was also run separately with conda and mamba: both kept transitive dependencies out of explicit requested specs and completely removed their copy-isolated test workspaces.
+- Manual validation covered dependency-only Narwhals/Altair repair, PySide6 on Python 3.15.2, and a separately confirmed PyQt6 migration to Python 3.14.10 with 647 imports passing in the original environment. These manual flights preceded the later root-only history planning fix; they are not a fresh end-to-end flight of every release change.
 
 ## 0.2.8 - 2026-11-01
 
